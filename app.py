@@ -14,6 +14,9 @@ KST = timezone(timedelta(hours=9))
 UTC = timezone.utc
 LOCK = threading.Lock()
 
+# [FIX] Redis 장애/웹훅 plain-text 상황에서도 동작하도록 메모리 보조 캐시
+MEM_THROTTLE: Dict[str, int] = {}
+
 # ===== ENV =====
 def E(k: str, d: str = "") -> str: return os.getenv(k, d).strip()
 def Ei(k: str, d: int) -> int:
@@ -104,8 +107,12 @@ class Redis:
     def cmd(self, arr: List[Any]):
         if not self.ok: return None
         try:
-            r = requests.post(self.url, headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
-                              data=sjson(arr).encode("utf-8"), timeout=TIMEOUT)
+            r = requests.post(
+                self.url,
+                headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
+                data=sjson(arr).encode("utf-8"),
+                timeout=TIMEOUT
+            )
             if r.status_code >= 400:
                 logging.warning("Upstash %s %s", r.status_code, r.text[:200]); return None
             return r.json().get("result")
@@ -129,46 +136,41 @@ def rpush_json(k: str, v: Dict[str, Any], keep=2000):
 
 # ===== Telegram =====
 def tg_send(token: str, chat_id: str, text: str, preview=True) -> bool:
-    if not token or not chat_id:
-        return False
-
+    if not token or not chat_id: return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    base_payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "disable_web_page_preview": preview
-    }
 
+    # 1) Markdown 시도
     try:
-        # 1차: Markdown
-        r = requests.post(url, json={**base_payload, "parse_mode": "Markdown"}, timeout=TIMEOUT)
-        ok = False
-        try:
+        r = requests.post(url, json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": preview
+        }, timeout=TIMEOUT)
+        if r.status_code < 400:
             j = r.json()
-            ok = (r.status_code < 400 and bool(j.get("ok")))
-        except Exception:
-            ok = False
-
-        if ok:
-            return True
-
-        logging.warning("TG send fail(markdown) %s %s", r.status_code, (r.text or "")[:300])
-
-        # 2차: plain text fallback
-        r2 = requests.post(url, json=base_payload, timeout=TIMEOUT)
-        try:
-            j2 = r2.json()
-        except Exception:
-            j2 = {}
-
-        if r2.status_code >= 400 or not j2.get("ok"):
-            logging.warning("TG send fail(plain) %s %s", r2.status_code, (r2.text or "")[:300])
-            return False
-        return True
-
+            if j.get("ok"): return True
+            logging.warning("TG send fail markdown json=%s", j)
+        else:
+            logging.warning("TG send fail markdown %s %s", r.status_code, r.text[:300])
     except Exception as e:
-        logging.warning("TG send err %s", e)
-        return False
+        logging.warning("TG send err markdown %s", e)
+
+    # [FIX] 2) Markdown 파싱 에러 대비 plain-text 재시도
+    try:
+        r2 = requests.post(url, json={
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": preview
+        }, timeout=TIMEOUT)
+        if r2.status_code >= 400:
+            logging.warning("TG send fail plain %s %s", r2.status_code, r2.text[:300]); return False
+        j2 = r2.json()
+        if not j2.get("ok"):
+            logging.warning("TG send fail plain json=%s", j2); return False
+        return True
+    except Exception as e:
+        logging.warning("TG send err plain %s", e); return False
 
 def tg_send_chunk(token: str, chat_id: str, text: str, n=3500):
     if len(text) <= n: tg_send(token, chat_id, text); return
@@ -398,197 +400,160 @@ HELP_TEXT = (
 )
 
 # ===== Signal Parse =====
-def parse_loose_kv_text(text: str) -> Dict[str, Any]:
+def _parse_plain_text_payload(raw: str) -> Dict[str, Any]:
+    """
+    [FIX] TradingView가 text/plain으로 보내는 경우 대응
+    - JSON 문자열
+    - querystring(key=value&...)
+    - 라인/쉼표 기반 key:value 또는 key=value
+    모두 지원
+    """
     out: Dict[str, Any] = {}
-    if not isinstance(text, str):
-        return out
-    s = text.strip()
-    if not s:
+    raw = (raw or "").strip()
+    if not raw:
         return out
 
-    # line 기반 key:value / key=value
-    for line in re.split(r"[\r\n]+", s):
-        line = line.strip()
-        if not line:
-            continue
-        # 쉼표로도 쪼개보기
-        for part in re.split(r"\s*,\s*", line):
-            part = part.strip()
-            m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(.+)$", part)
-            if m:
-                k, v = m.group(1), m.group(2).strip().strip('"').strip("'")
-                out[k] = v
-
-    # 공백 구분 key=value
-    for m in re.finditer(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^\s]+)", s):
-        k, v = m.group(1), m.group(2).strip().strip('"').strip("'")
-        out.setdefault(k, v)
-
-    return out
-
-def dict_maybe(v: Any) -> Dict[str, Any]:
-    if isinstance(v, dict):
-        return dict(v)
-
-    if isinstance(v, list):
-        for it in v:
-            if isinstance(it, dict):
-                return dict(it)
-        return {}
-
-    if isinstance(v, str):
-        s = v.strip()
-        if not s:
-            return {}
-
-        # 1) JSON 문자열
-        try:
-            j = json.loads(s)
-            d = dict_maybe(j)
-            if d:
-                return d
-        except Exception:
-            pass
-
-        # 2) querystring(payload=... or message=...)
-        try:
-            qs = parse_qs(s, keep_blank_values=True)
-            if qs:
-                d = {k: (vals[0] if isinstance(vals, list) and vals else vals) for k, vals in qs.items()}
-                for nk in ("payload", "message", "data", "alert"):
-                    if nk in d:
-                        nd = dict_maybe(d.get(nk))
-                        if nd:
-                            d.update(nd)
-                if d:
-                    return d
-        except Exception:
-            pass
-
-        # 3) loose key/value text
-        kv = parse_loose_kv_text(s)
-        if kv:
-            return kv
-
-    return {}
-
-def expand_nested_payload(d: Dict[str, Any]) -> Dict[str, Any]:
-    out = dict(d or {})
-
-    for nk in ("payload", "message", "data", "alert", "content", "body", "text"):
-        if nk in out:
-            nd = dict_maybe(out.get(nk))
-            if nd:
-                out.update(nd)
-
-    # 소문자 키 보강
-    for k, v in list(out.items()):
-        lk = str(k).lower()
-        if lk not in out:
-            out[lk] = v
-
-    return out
-
-def extract_tv_payload(req) -> Dict[str, Any]:
-    cands: List[Dict[str, Any]] = []
-
-    # JSON body
+    # 1) JSON 문자열
     try:
-        j = req.get_json(silent=True)
-        d = dict_maybe(j)
-        if d:
-            cands.append(expand_nested_payload(d))
-    except Exception:
+        j = json.loads(raw)
+        if isinstance(j, dict):
+            return j
+    except:
         pass
 
-    # form-data / x-www-form-urlencoded
+    # 2) querystring
+    if "=" in raw and "&" in raw and "\n" not in raw:
+        try:
+            qs = parse_qs(raw, keep_blank_values=True)
+            for k, v in qs.items():
+                if v:
+                    out[k] = v[-1]
+            if out:
+                out["text"] = raw
+                return out
+        except:
+            pass
+
+    # 3) line/csv key:value or key=value
+    lines = []
+    for block in raw.splitlines():
+        block = block.strip()
+        if not block: 
+            continue
+        # 한 줄에 콤마로 key:value 여러개
+        parts = [p.strip() for p in block.split(",")] if (":" in block or "=" in block) else [block]
+        lines.extend([p for p in parts if p])
+
+    kv_pat = re.compile(r'^\s*([A-Za-z0-9_.\-]+)\s*[:=]\s*(.+?)\s*$')
+    for ln in lines:
+        m = kv_pat.match(ln)
+        if m:
+            k, v = m.group(1), m.group(2)
+            out[k] = v.strip().strip('"').strip("'")
+
+    out["text"] = raw
+    return out
+
+def parse_tv_payload(req) -> Dict[str, Any]:
+    # JSON 우선
+    j = req.get_json(silent=True)
+    if isinstance(j, dict):
+        return j
+
+    # form-data 대응
     try:
         if req.form:
-            d = dict(req.form.to_dict(flat=True))
-            d = expand_nested_payload(d)
+            d = dict(req.form)
             if d:
-                cands.append(d)
-    except Exception:
+                return d
+    except:
         pass
 
-    # raw body text
-    try:
-        raw = (req.get_data(as_text=True) or "").strip()
-        d = dict_maybe(raw)
-        if d:
-            cands.append(expand_nested_payload(d))
-    except Exception:
-        pass
-
-    if not cands:
-        return {}
-
-    def score(x: Dict[str, Any]) -> int:
-        keys = {str(k).lower() for k in x.keys()}
-        core = sum(1 for k in [
-            "symbol", "ticker", "pair", "market",
-            "side", "action", "signal",
-            "strategy", "strategy_name", "indicator",
-            "price", "close"
-        ] if k in keys)
-        return core * 10 + len(keys)
-
-    cands.sort(key=score, reverse=True)
-    return cands[0]
+    # text/plain 대응
+    raw = (req.data or b"").decode("utf-8", errors="ignore")
+    p = _parse_plain_text_payload(raw)
+    if p:
+        return p
+    return {}
 
 def infer_signal(payload: Dict[str,Any]) -> Dict[str,Any]:
-    p = dict(payload or {})
-    for k, v in list(p.items()):
-        lk = str(k).lower()
-        if lk not in p:
-            p[lk] = v
-
-    symbol = p.get("symbol") or p.get("ticker") or p.get("pair") or p.get("market") or p.get("exchange_ticker") or "BYBIT·BTCUSDT.P"
-    tf = str(p.get("interval") or p.get("timeframe") or p.get("tf") or "1m")
-    price = p.get("price") or p.get("close") or p.get("last") or p.get("entry") or "-"
-    action = str(p.get("action") or p.get("side") or p.get("signal") or "").lower()
+    symbol = payload.get("symbol") or payload.get("ticker") or payload.get("pair") or payload.get("market") or payload.get("instrument") or "BYBIT·BTCUSDT.P"
+    tf = str(payload.get("interval") or payload.get("timeframe") or payload.get("tf") or payload.get("period") or "1m")
+    price = payload.get("price") or payload.get("close") or payload.get("last") or payload.get("entry") or payload.get("mark") or "-"
+    action = str(payload.get("action") or payload.get("side") or payload.get("signal") or payload.get("order_action") or "").lower()
 
     blob = " | ".join([
-        str(p.get("strategy","")), str(p.get("strategy_name","")), str(p.get("indicator","")),
-        str(p.get("title","")), str(p.get("name","")), str(p.get("message","")),
-        str(p.get("comment","")), str(p.get("text","")), str(p)
+        str(payload.get("strategy","")), str(payload.get("strategy_name","")), str(payload.get("indicator","")),
+        str(payload.get("title","")), str(payload.get("name","")), str(payload.get("message","")),
+        str(payload.get("comment","")), str(payload.get("text","")), str(payload)
     ]).lower()
 
     kind = "unknown"
-    if ("barcode" in blob) or ("바코드" in blob): kind = "barcode"
-    elif ("prism" in blob) or ("프리즘" in blob): kind = "prism"
-    elif ("rsi" in blob) or re.search(r"\brsi\b", blob): kind = "rsi"
-    elif ("panterra" in blob) or ("판테라" in blob): kind = "panterra"
+    if ("barcode" in blob) or ("바코드" in blob):
+        kind = "barcode"
+    elif ("prism" in blob) or ("프리즘" in blob):
+        kind = "prism"
+    elif ("rsi" in blob) or re.search(r"\brsi\b", blob):
+        kind = "rsi"
+    elif ("panterra" in blob) or ("판테라" in blob) or re.search(r"pan\s*terra", blob):
+        kind = "panterra"
 
     side = "buy"
-    if any(x in blob for x in ["short","sell","매도","노란별","저항"]): side = "sell"
+    if any(x in blob for x in ["short","sell","매도","노란별","저항","숏"]): side = "sell"
     if any(x in action for x in ["sell","short"]): side = "sell"
     if any(x in action for x in ["buy","long"]): side = "buy"
 
-    lo = p.get("low") or p.get("support_low") or p.get("zone_low") or p.get("from") or p.get("min")
-    hi = p.get("high") or p.get("support_high") or p.get("zone_high") or p.get("to") or p.get("max")
-    if lo is None: lo = p.get("zone1") or p.get("price1") or "-"
-    if hi is None: hi = p.get("zone2") or p.get("price2") or "-"
-    fire = "🔥🔥" if str(p.get("fire") or p.get("strength") or p.get("level") or "").strip() in ("2","high","strong","🔥🔥") else "🔥"
+    lo = payload.get("low") or payload.get("support_low") or payload.get("zone_low") or payload.get("from") or payload.get("min")
+    hi = payload.get("high") or payload.get("support_high") or payload.get("zone_high") or payload.get("to") or payload.get("max")
+    if lo is None: lo = payload.get("zone1") or payload.get("price1") or "-"
+    if hi is None: hi = payload.get("zone2") or payload.get("price2") or "-"
+    fire = "🔥🔥" if str(payload.get("fire") or payload.get("strength") or payload.get("level") or "").strip() in ("2","high","strong","🔥🔥") else "🔥"
 
-    # fallback: 단순 BUY/SELL payload라도 panterra로 처리
-    if kind == "unknown":
-        if any(x in action for x in ["buy", "sell", "long", "short"]) and symbol:
-            kind = "panterra"
+    # [FIX] plain text에서 심볼/TF/가격 추출 보조
+    if isinstance(symbol, str):
+        ss = symbol.strip()
+    else:
+        ss = str(symbol)
 
-    if isinstance(symbol, str) and "·" not in symbol and (symbol.endswith(".P") or "USDT" in symbol.upper()):
-        symbol = f"BYBIT·{symbol}"
+    if (not ss) or ss == "BYBIT·BTCUSDT.P":
+        m_sym = re.search(r'([A-Z]{2,20}(?:USDT|USD)(?:\.P|PERP)?)', str(payload.get("text","")).upper())
+        if m_sym:
+            ss = m_sym.group(1)
 
-    return {"kind":kind,"side":side,"symbol":str(symbol),"tf":tf,"price":price,"low":lo,"high":hi,"fire":fire}
+    if tf in ("", "None", "none"):
+        m_tf = re.search(r'\b(\d+\s*[mhdw])\b', str(payload.get("text","")).lower())
+        if m_tf:
+            tf = m_tf.group(1).replace(" ", "")
+
+    if price == "-" or str(price).strip() == "":
+        m_pr = re.search(r'(\d+(?:\.\d+)?)', str(payload.get("text","")))
+        if m_pr:
+            price = m_pr.group(1)
+
+    if isinstance(ss, str) and "·" not in ss and (ss.endswith(".P") or "USDT" in ss.upper()):
+        ss = f"BYBIT·{ss}"
+
+    return {"kind":kind,"side":side,"symbol":str(ss),"tf":tf,"price":price,"low":lo,"high":hi,"fire":fire}
 
 def panterra_throttle(symbol: str, side: str, sec=1800) -> bool:
     k = f"throttle:panterra:{symbol}:{side}"
-    last = R.get(k); now = int(time.time())
+    now = int(time.time())
+
+    # Redis 우선
+    last = R.get(k)
     if last is not None:
         try:
             if now - int(last) < sec: return True
         except: pass
-    R.set(k, str(now)); return False
+        R.set(k, str(now))
+        return False
+
+    # [FIX] Redis가 비거나 미설정일 때 메모리 fallback
+    last_mem = MEM_THROTTLE.get(k)
+    if last_mem is not None and (now - int(last_mem) < sec):
+        return True
+    MEM_THROTTLE[k] = now
+    return False
 
 def build_signal_msg(payload: Dict[str,Any]) -> Optional[str]:
     f = infer_signal(payload); ts = now_kst()
@@ -632,19 +597,21 @@ def fee_calc(symbol: str, st: datetime, en: datetime, closed: float, entry_v: fl
     ff = -(abs(entry_v)+abs(exit_v))*TAKER_FEE_RATE
     return ff, closed + ff
 
-def send_signal_alert(text: str) -> Dict[str, int]:
-    attempted, sent = 0, 0
+def send_signal_alert(text: str):
+    sent = 0
     for cid in CHAT_IDS:
         if (not is_group(cid)) or sw_get("signal", cid)=="1":
-            attempted += 1
             if tg_send(BOT_TOKEN, cid, text):
                 sent += 1
-    return {"attempted": attempted, "sent": sent, "failed": attempted - sent}
+    logging.info("signal alert sent=%s/%s", sent, len(CHAT_IDS))
 
 def send_pos_alert(text: str):
+    sent = 0
     for cid in CHAT_IDS_POSITION:
         if (not is_group(cid)) or sw_get("position", cid)=="1":
-            tg_send(BOT_TOKEN_POSITION, cid, text)
+            if tg_send(BOT_TOKEN_POSITION, cid, text):
+                sent += 1
+    logging.info("position alert sent=%s/%s", sent, len(CHAT_IDS_POSITION))
 
 def process_positions(send_alert=True) -> Dict[str,Any]:
     cur = {}
@@ -831,42 +798,14 @@ def switch_logs(n=10) -> str:
 
 def snapshot_text() -> str:
     ps = fetch_positions()
-
-    if not ps:
-        return (
-            "📌 *현재 포지션 스냅샷*\n"
-            "━━━━━━━━━━━━━━\n"
-            "오픈 포지션 없음\n\n"
-            f"🕒 {to_kst()}"
-        )
-
-    lines = [
-        "📌 *현재 포지션 스냅샷*",
-        "━━━━━━━━━━━━━━"
-    ]
-
-    for i, p in enumerate(ps):
-        head = "📈 *포지션 스냅샷*" if p["side"] == "Long" else "📉 *포지션 스냅샷*"
-
-        lines += [
-            head,
-            f"BingX · {p['symbol']}",
-            f"{p['side']} · {p['margin_mode']} · {int(round(p['leverage']))}x",
-            "",
-            f"*Entry*    : *{fmt_price(p['entry_price'])} USDT*",
-            f"*Position* : *{fmt_qty(p['qty'])} {p['base']}*",
-            f"Value      : {fmt_num(p['value'], 2)} USDT",
-            f"Margin     : {fmt_num(p['margin'], 2)} USDT",
-            "",
-            f"uPnL : {sign(p['u_pnl'])} USDT ({pct(p['u_pnl_pct'])})",
-            f"rPnL : {sign(p['r_pnl'])} USDT",
-        ]
-
-        if i < len(ps) - 1:
-            lines += ["", "━━━━━━━━━━━━━━"]
-
-    lines += ["", f"🕒 {to_kst()}"]
-    return "\n".join(lines)
+    if not ps: return f"📭 현재 오픈 포지션이 없어.\n\n🕒 {to_kst()}"
+    lines = ["📌 *현재 포지션 스냅샷*","━━━━━━━━━━━━━━"]
+    for p in ps:
+        lines += [f"{p['symbol']} | {p['side']}",
+                  f"Entry {fmt_price(p['entry_price'])} | Pos {fmt_qty(p['qty'])} {p['base']}",
+                  f"uPnL {sign(p['u_pnl'])} ({pct(p['u_pnl_pct'])}) | rPnL {sign(p['r_pnl'])}",""]
+    lines.append(f"🕒 {to_kst()}")
+    return "\n".join(lines).strip()
 
 def state_reset() -> str:
     R.delete("state:open_positions"); R.delete("state:init_done")
@@ -932,35 +871,26 @@ def root():
 
 @app.route("/tv-webhook", methods=["POST"])
 def tv_webhook():
-    if TV_WEBHOOK_SECRET and request.args.get("secret","") != TV_WEBHOOK_SECRET:
+    payload = parse_tv_payload(request)
+
+    # [FIX] secret를 query/body/header 모두 허용 (기존 query 유지)
+    req_secret = (
+        request.args.get("secret","")
+        or str(payload.get("secret",""))
+        or str(payload.get("passphrase",""))
+        or request.headers.get("X-Webhook-Secret","")
+    )
+    if TV_WEBHOOK_SECRET and req_secret != TV_WEBHOOK_SECRET:
         return jsonify({"ok":False,"error":"unauthorized"}), 401
 
-    payload = extract_tv_payload(request)
+    if not isinstance(payload, dict): payload = {}
     msg = build_signal_msg(payload)
-
     if msg:
-        stat = send_signal_alert(msg)
-        sig = infer_signal(payload)
-        logging.info("tv-webhook sent=%s deliver=%s kind=%s side=%s", stat["sent"] > 0, stat, sig.get("kind"), sig.get("side"))
-        return jsonify({
-            "ok": True,
-            "sent": stat["sent"] > 0,
-            "deliver": stat,
-            "kind": sig.get("kind"),
-            "side": sig.get("side")
-        })
-
-    sig = infer_signal(payload)
-    logging.info("tv-webhook ignored reason=ignored_or_throttled kind=%s side=%s keys=%s",
-                 sig.get("kind"), sig.get("side"), list(payload.keys())[:20])
-    return jsonify({
-        "ok": True,
-        "sent": False,
-        "reason": "ignored_or_throttled",
-        "kind": sig.get("kind"),
-        "side": sig.get("side"),
-        "payload_keys": list(payload.keys())[:20]
-    })
+        send_signal_alert(msg)
+        return jsonify({"ok":True,"sent":True})
+    # 디버깅 도움
+    inf = infer_signal(payload)
+    return jsonify({"ok":True,"sent":False,"reason":"ignored_or_throttled_or_unknown","infer":inf})
 
 @app.route("/tg/position", methods=["POST"])
 def tg_position():
@@ -978,17 +908,6 @@ def tg_position():
 def tg_signal():
     if TG_CONTROL_SECRET and request.args.get("secret","") != TG_CONTROL_SECRET:
         return jsonify({"ok":False,"error":"unauthorized"}), 401
-
-    upd = request.get_json(silent=True) or {}
-    if not isinstance(upd, dict):
-        return jsonify({"ok":True,"ignored":True})
-
-    chat_id, uid, text = parse_update(upd)
-    if chat_id and text.startswith("/"):
-        resp = handle_command(chat_id, uid, text)
-        if resp:
-            tg_send(BOT_TOKEN, chat_id, resp)
-
     return jsonify({"ok":True})
 
 @app.route("/positions_check", methods=["GET","POST"])
@@ -1015,11 +934,6 @@ def daily_report():
 def health():
     with LOCK: auto = maybe_auto_report()
     return jsonify({"ok":True,"auto_report":auto,"time":to_kst()})
-
-# /health 별칭
-@app.route("/health", methods=["GET"])
-def health_alias():
-    return health()
 
 # ===== Bootstrap =====
 def bootstrap():
