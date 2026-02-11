@@ -18,74 +18,17 @@ LOCK = threading.Lock()
 MEM_THROTTLE: Dict[str, int] = {}
 
 # ===== ENV =====
-def E(k: str, d: str = "") -> str:
-    return os.getenv(k, d).strip()
-
+def E(k: str, d: str = "") -> str: return os.getenv(k, d).strip()
 def Ei(k: str, d: int) -> int:
-    try:
-        return int(E(k, str(d)))
-    except:
-        return d
-
-def _stripq(s: str) -> str:
-    return str(s).strip().strip('"').strip("'")
-
-def parse_id_list(raw: str) -> List[str]:
-    raw = (raw or "").strip()
-    if not raw:
-        return []
-
-    # JSON list 형태 지원: ["id1","id2"] / ['id1','id2']
-    if raw.startswith("[") and raw.endswith("]"):
-        try:
-            arr = json.loads(raw.replace("'", '"'))
-            if isinstance(arr, list):
-                out = []
-                for x in arr:
-                    t = _stripq(str(x))
-                    if t:
-                        out.append(t)
-                # dedupe keep order
-                seen = set()
-                fin = []
-                for x in out:
-                    if x not in seen:
-                        seen.add(x)
-                        fin.append(x)
-                return fin
-        except:
-            pass
-
-    # 콤마/세미콜론/줄바꿈 구분 지원
-    parts = re.split(r"[,;\n]+", raw)
-    out = []
-    for p in parts:
-        t = _stripq(p)
-        if t:
-            out.append(t)
-
-    seen = set()
-    fin = []
-    for x in out:
-        if x not in seen:
-            seen.add(x)
-            fin.append(x)
-    return fin
+    try: return int(E(k, str(d)))
+    except: return d
 
 BOT_TOKEN = E("BOT_TOKEN")
 BOT_TOKEN_POSITION = E("BOT_TOKEN_POSITION", BOT_TOKEN)
 
-# [FIX] 다양한 ENV 키 호환
-CHAT_IDS = parse_id_list(E("CHAT_IDS") or E("CHAT_ID") or E("SIGNAL_CHAT_IDS"))
-CHAT_IDS_POSITION = parse_id_list(E("CHAT_IDS_POSITION") or E("POSITION_CHAT_IDS"))
-
-# [FIX] 한쪽만 들어온 경우 fallback
-if not CHAT_IDS and CHAT_IDS_POSITION:
-    CHAT_IDS = list(CHAT_IDS_POSITION)
-if not CHAT_IDS_POSITION and CHAT_IDS:
-    CHAT_IDS_POSITION = list(CHAT_IDS)
-
-ADMIN_USER_IDS = set(parse_id_list(E("ADMIN_USER_IDS")))
+CHAT_IDS = [x.strip() for x in E("CHAT_IDS").split(",") if x.strip()]
+CHAT_IDS_POSITION = [x.strip() for x in E("CHAT_IDS_POSITION").split(",") if x.strip()]
+ADMIN_USER_IDS = set(x.strip() for x in E("ADMIN_USER_IDS").split(",") if x.strip())
 
 TV_WEBHOOK_SECRET = E("TV_WEBHOOK_SECRET")
 TG_CONTROL_SECRET = E("TG_CONTROL_SECRET")
@@ -107,168 +50,115 @@ TAKER_FEE_RATE = float(E("TAKER_FEE_RATE", "0.0005"))
 TIMEOUT = Ei("REQUEST_TIMEOUT", 15)
 
 # ===== Utils =====
-def now_kst() -> datetime:
-    return datetime.now(tz=KST)
-
+def now_kst() -> datetime: return datetime.now(tz=KST)
 def to_kst(dt: Optional[datetime] = None, sec=False) -> str:
     dt = dt or now_kst()
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=KST)
+    if dt.tzinfo is None: dt = dt.replace(tzinfo=KST)
     dt = dt.astimezone(KST)
     return dt.strftime("%Y-%m-%d %H:%M:%S (KST)" if sec else "%Y-%m-%d %H:%M (KST)")
-
-def hm(dt: datetime) -> str:
-    return dt.astimezone(KST).strftime("%m-%d %H:%M")
-
+def hm(dt: datetime) -> str: return dt.astimezone(KST).strftime("%m-%d %H:%M")
 def asf(v: Any, d=0.0) -> float:
     try:
-        if v is None or isinstance(v, bool):
-            return d
+        if v is None or isinstance(v, bool): return d
         return float(str(v).replace(",", "").strip())
-    except:
-        return d
-
+    except: return d
 def asi(v: Any, d=0) -> int:
-    try:
-        return int(str(v).strip())
-    except:
-        return d
-
+    try: return int(str(v).strip())
+    except: return d
 def iso_parse(s: str) -> Optional[datetime]:
     try:
-        if not s:
-            return None
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
+        if not s: return None
+        if s.endswith("Z"): s = s[:-1] + "+00:00"
         return datetime.fromisoformat(s)
-    except:
-        return None
-
-def sjson(x: Any) -> str:
-    return json.dumps(x, ensure_ascii=False, separators=(",", ":"))
-
+    except: return None
+def sjson(x: Any) -> str: return json.dumps(x, ensure_ascii=False, separators=(",", ":"))
 def pjson(s: Any, d: Any):
     try:
-        if s is None:
-            return d
-        if isinstance(s, (dict, list)):
-            return s
+        if s is None: return d
+        if isinstance(s, (dict, list)): return s
         return json.loads(s)
-    except:
-        return d
-
-def sign(v: float) -> str:
-    return f"+{v:,.2f}" if asf(v) > 0 else f"{asf(v):,.2f}"
-
-def pct(v: float) -> str:
-    return f"+{asf(v):.2f}%" if asf(v) > 0 else f"{asf(v):.2f}%"
-
-def fmt_num(v: float, d=2) -> str:
-    return f"{asf(v):,.{d}f}"
-
+    except: return d
+def sign(v: float) -> str: return f"+{v:,.2f}" if asf(v)>0 else f"{asf(v):,.2f}"
+def pct(v: float) -> str: return f"+{asf(v):.2f}%" if asf(v)>0 else f"{asf(v):.2f}%"
+def fmt_num(v: float, d=2) -> str: return f"{asf(v):,.{d}f}"
 def fmt_price(v: float) -> str:
     x = abs(asf(v))
     d = 2 if x >= 100 else (4 if x >= 1 else 6)
     return f"{asf(v):,.{d}f}"
-
 def fmt_qty(v: float) -> str:
     x = abs(asf(v))
     d = 2 if x >= 100 else 4
     return f"{x:,.{d}f}"
-
 def base_asset(symbol: str) -> str:
     s = (symbol or "").upper()
     for sep in ["-", "/", "_"]:
-        if sep in s:
-            return s.split(sep)[0]
+        if sep in s: return s.split(sep)[0]
     for q in ["USDT", "USD", "PERP", ".P"]:
-        if s.endswith(q):
-            return s[:-len(q)] or s
+        if s.endswith(q): return s[:-len(q)] or s
     return s
+
+def _uniq(seq):
+    out, seen = [], set()
+    for x in seq:
+        x = str(x).strip()
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
 
 # ===== Upstash =====
 class Redis:
     def __init__(self, url: str, token: str):
         self.url = (url or "").rstrip("/")
         self.token = token or ""
-
     @property
-    def ok(self):
-        return bool(self.url and self.token)
-
+    def ok(self): return bool(self.url and self.token)
     def cmd(self, arr: List[Any]):
-        if not self.ok:
-            return None
+        if not self.ok: return None
         try:
             r = requests.post(
                 self.url,
                 headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
                 data=sjson(arr).encode("utf-8"),
-                timeout=TIMEOUT,
+                timeout=TIMEOUT
             )
             if r.status_code >= 400:
-                logging.warning("Upstash %s %s", r.status_code, r.text[:200])
-                return None
+                logging.warning("Upstash %s %s", r.status_code, r.text[:200]); return None
             return r.json().get("result")
         except Exception as e:
-            logging.warning("Upstash error: %s", e)
-            return None
-
+            logging.warning("Upstash error: %s", e); return None
     def get(self, k: str):
         v = self.cmd(["GET", k])
         return None if v is None else str(v)
-
-    def set(self, k: str, v: str):
-        return self.cmd(["SET", k, v]) == "OK"
-
-    def delete(self, k: str):
-        return asi(self.cmd(["DEL", k])) >= 0
-
-    def lpush(self, k: str, v: str):
-        return asi(self.cmd(["LPUSH", k, v]))
-
-    def ltrim(self, k: str, a: int, b: int):
-        return self.cmd(["LTRIM", k, a, b]) == "OK"
-
+    def set(self, k: str, v: str): return self.cmd(["SET", k, v]) == "OK"
+    def delete(self, k: str): return asi(self.cmd(["DEL", k])) >= 0
+    def lpush(self, k: str, v: str): return asi(self.cmd(["LPUSH", k, v]))
+    def ltrim(self, k: str, a: int, b: int): return self.cmd(["LTRIM", k, a, b]) == "OK"
     def lrange(self, k: str, a: int, b: int):
-        v = self.cmd(["LRANGE", k, a, b])
-        return [str(x) for x in v] if isinstance(v, list) else []
-
+        v = self.cmd(["LRANGE", k, a, b]); return [str(x) for x in v] if isinstance(v, list) else []
 
 R = Redis(UPSTASH_URL, UPSTASH_TOKEN)
-
-def rget_json(k: str, d):
-    return pjson(R.get(k), d)
-
-def rset_json(k: str, v):
-    R.set(k, sjson(v))
-
+def rget_json(k: str, d): return pjson(R.get(k), d)
+def rset_json(k: str, v): R.set(k, sjson(v))
 def rpush_json(k: str, v: Dict[str, Any], keep=2000):
-    R.lpush(k, sjson(v))
-    R.ltrim(k, 0, keep - 1)
+    R.lpush(k, sjson(v)); R.ltrim(k, 0, keep-1)
 
 # ===== Telegram =====
 def tg_send(token: str, chat_id: str, text: str, preview=True) -> bool:
-    if not token or not chat_id:
-        return False
+    if not token or not chat_id: return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
 
     # 1) Markdown 시도
     try:
-        r = requests.post(
-            url,
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "Markdown",
-                "disable_web_page_preview": preview,
-            },
-            timeout=TIMEOUT,
-        )
+        r = requests.post(url, json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": preview
+        }, timeout=TIMEOUT)
         if r.status_code < 400:
             j = r.json()
-            if j.get("ok"):
-                return True
+            if j.get("ok"): return True
             logging.warning("TG send fail markdown json=%s", j)
         else:
             logging.warning("TG send fail markdown %s %s", r.status_code, r.text[:300])
@@ -277,208 +167,139 @@ def tg_send(token: str, chat_id: str, text: str, preview=True) -> bool:
 
     # [FIX] 2) Markdown 파싱 에러 대비 plain-text 재시도
     try:
-        r2 = requests.post(
-            url,
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "disable_web_page_preview": preview,
-            },
-            timeout=TIMEOUT,
-        )
+        r2 = requests.post(url, json={
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": preview
+        }, timeout=TIMEOUT)
         if r2.status_code >= 400:
-            logging.warning("TG send fail plain %s %s", r2.status_code, r2.text[:300])
-            return False
+            logging.warning("TG send fail plain %s %s", r2.status_code, r2.text[:300]); return False
         j2 = r2.json()
         if not j2.get("ok"):
-            logging.warning("TG send fail plain json=%s", j2)
-            return False
+            logging.warning("TG send fail plain json=%s", j2); return False
         return True
     except Exception as e:
-        logging.warning("TG send err plain %s", e)
-        return False
+        logging.warning("TG send err plain %s", e); return False
 
 def tg_send_chunk(token: str, chat_id: str, text: str, n=3500):
-    if len(text) <= n:
-        tg_send(token, chat_id, text)
-        return
+    if len(text) <= n: tg_send(token, chat_id, text); return
     cur = ""
     for ln in text.splitlines():
         add = ln + "\n"
         if len(cur) + len(add) > n:
-            if cur.strip():
-                tg_send(token, chat_id, cur.rstrip())
+            if cur.strip(): tg_send(token, chat_id, cur.rstrip())
             cur = add
-        else:
-            cur += add
-    if cur.strip():
-        tg_send(token, chat_id, cur.rstrip())
+        else: cur += add
+    if cur.strip(): tg_send(token, chat_id, cur.rstrip())
 
 # ===== Switch/Config =====
 def is_group(chat_id: str) -> bool:
-    try:
-        return int(chat_id) < 0
-    except:
-        return chat_id.startswith("-")
-
-def is_admin(uid: str) -> bool:
-    return (not ADMIN_USER_IDS) or (str(uid) in ADMIN_USER_IDS)
-
-def sw_key(kind: str, chat_id: str) -> str:
-    return f"switch:{kind}:{chat_id}"
-
+    try: return int(chat_id) < 0
+    except: return chat_id.startswith("-")
+def is_admin(uid: str) -> bool: return (not ADMIN_USER_IDS) or (str(uid) in ADMIN_USER_IDS)
+def sw_key(kind: str, chat_id: str) -> str: return f"switch:{kind}:{chat_id}"
 def sw_get(kind: str, chat_id: str) -> str:
     d = "0" if is_group(chat_id) else "1"
     v = R.get(sw_key(kind, chat_id))
     return "1" if (v if v is not None else d) == "1" else "0"
-
-def sw_set(kind: str, chat_id: str, on: bool):
-    R.set(sw_key(kind, chat_id), "1" if on else "0")
-
+def sw_set(kind: str, chat_id: str, on: bool): R.set(sw_key(kind, chat_id), "1" if on else "0")
 def cfg_get(k: str, d=""):
     v = R.get(f"cfg:{k}")
     return str(v) if v is not None else d
-
-def cfg_set(k: str, v: str):
-    R.set(f"cfg:{k}", str(v))
-
+def cfg_set(k: str, v: str): R.set(f"cfg:{k}", str(v))
 def cfg_init():
-    if cfg_get("report_auto", "") == "":
-        cfg_set("report_auto", "on" if REPORT_AUTO_DEFAULT == "on" else "off")
-    if cfg_get("report_auto_minute", "") == "":
-        cfg_set("report_auto_minute", str(REPORT_AUTO_MINUTE_DEFAULT))
-    if cfg_get("report_auto_chat", "") == "":
+    if cfg_get("report_auto","")== "": cfg_set("report_auto", "on" if REPORT_AUTO_DEFAULT=="on" else "off")
+    if cfg_get("report_auto_minute","")== "": cfg_set("report_auto_minute", str(REPORT_AUTO_MINUTE_DEFAULT))
+    if cfg_get("report_auto_chat","")== "":
         target = REPORT_AUTO_CHAT_DEFAULT
         if not target:
             cands = [c for c in CHAT_IDS_POSITION if not is_group(c)]
             target = cands[0] if cands else (CHAT_IDS_POSITION[0] if CHAT_IDS_POSITION else (CHAT_IDS[0] if CHAT_IDS else ""))
         cfg_set("report_auto_chat", target)
 
-def switch_log(cmd: str, uid: str, note: str = ""):
+def switch_log(cmd: str, uid: str, note: str=""):
     rpush_json("logs:switch", {"ts": now_kst().isoformat(), "cmd": cmd, "uid": uid, "note": note}, keep=300)
 
 # ===== BingX =====
-def bingx_req(path: str, params: Optional[Dict[str, Any]] = None, method="GET") -> Optional[Dict[str, Any]]:
-    if not (BINGX_API_KEY and BINGX_API_SECRET):
-        return None
+def bingx_req(path: str, params: Optional[Dict[str, Any]]=None, method="GET") -> Optional[Dict[str, Any]]:
+    if not (BINGX_API_KEY and BINGX_API_SECRET): return None
     p = dict(params or {})
-    p["timestamp"] = int(time.time() * 1000)
-    p["recvWindow"] = 5000
+    p["timestamp"] = int(time.time()*1000); p["recvWindow"] = 5000
     qs = urlencode(sorted(p.items(), key=lambda x: x[0]), doseq=True)
     sig = hmac.new(BINGX_API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
     url = f"{BINGX_BASE_URL}{path}?{qs}&signature={sig}"
     try:
-        r = requests.post(url, headers={"X-BX-APIKEY": BINGX_API_KEY}, timeout=TIMEOUT) if method == "POST" \
+        r = requests.post(url, headers={"X-BX-APIKEY": BINGX_API_KEY}, timeout=TIMEOUT) if method=="POST" \
             else requests.get(url, headers={"X-BX-APIKEY": BINGX_API_KEY}, timeout=TIMEOUT)
         if r.status_code >= 400:
-            logging.warning("BingX %s %s %s", r.status_code, path, r.text[:240])
-            return None
+            logging.warning("BingX %s %s %s", r.status_code, path, r.text[:240]); return None
         return r.json()
     except Exception as e:
-        logging.warning("BingX err %s %s", path, e)
-        return None
+        logging.warning("BingX err %s %s", path, e); return None
 
 def data_list(x: Any) -> List[Dict[str, Any]]:
-    if isinstance(x, list):
-        return [i for i in x if isinstance(i, dict)]
+    if isinstance(x, list): return [i for i in x if isinstance(i, dict)]
     if isinstance(x, dict):
-        for k in ["positions", "positionData", "list", "data", "items"]:
+        for k in ["positions","positionData","list","data","items"]:
             v = x.get(k)
-            if isinstance(v, list):
-                return [i for i in v if isinstance(i, dict)]
-        if x.get("symbol") or x.get("ticker"):
-            return [x]
+            if isinstance(v, list): return [i for i in v if isinstance(i, dict)]
+        if x.get("symbol") or x.get("ticker"): return [x]
     return []
 
 def fetch_positions_raw() -> List[Dict[str, Any]]:
-    eps = [
-        "/openApi/swap/v2/user/positions",
-        "/openApi/swap/v2/user/position",
-        "/openApi/swap/v1/user/positions",
-        "/openApi/swap/v1/user/position",
-    ]
+    eps = ["/openApi/swap/v2/user/positions","/openApi/swap/v2/user/position","/openApi/swap/v1/user/positions","/openApi/swap/v1/user/position"]
     for ep in eps:
         j = bingx_req(ep, {})
-        if not j:
-            continue
+        if not j: continue
         arr = data_list(j.get("data", j))
-        if arr:
-            return arr
+        if arr: return arr
     return []
 
 def norm_pos(it: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     symbol = str(it.get("symbol") or it.get("ticker") or it.get("pair") or "").strip()
-    if not symbol:
-        return None
-
+    if not symbol: return None
     qty_signed = asf(it.get("positionAmt") or it.get("positionSize") or it.get("position") or it.get("positionAmount") or it.get("holdVolume") or it.get("size") or 0)
     sraw = str(it.get("positionSide") or it.get("side") or it.get("holdSide") or it.get("posSide") or "").lower()
-    if "short" in sraw or sraw in ("sell", "2"):
-        side = "Short"
-    elif "long" in sraw or sraw in ("buy", "1"):
-        side = "Long"
-    else:
-        side = "Short" if qty_signed < 0 else "Long"
-
+    if "short" in sraw or sraw in ("sell","2"): side = "Short"
+    elif "long" in sraw or sraw in ("buy","1"): side = "Long"
+    else: side = "Short" if qty_signed < 0 else "Long"
     qty = abs(qty_signed)
-    if qty <= 0:
-        qty = abs(asf(it.get("availableAmt") or 0))
-    if qty <= 0:
-        return None
-
+    if qty <= 0: qty = abs(asf(it.get("availableAmt") or 0))
+    if qty <= 0: return None
     entry = asf(it.get("avgPrice") or it.get("entryPrice") or it.get("avgOpenPrice") or it.get("openPrice") or 0)
     mark = asf(it.get("markPrice") or it.get("lastPrice") or it.get("indexPrice") or it.get("closePrice") or entry, entry)
     upl = asf(it.get("unrealizedProfit") or it.get("unRealizedProfit") or it.get("unrealizedPnl") or it.get("upl") or it.get("positionProfit") or 0)
     rpl = asf(it.get("realizedProfit") or it.get("realisedPnl") or it.get("realizedPnl") or it.get("rpl") or 0)
     lev = asf(it.get("leverage") or it.get("positionLeverage") or 0, 0.0)
     mm = str(it.get("marginType") or it.get("marginMode") or it.get("isolated") or "")
-    margin_mode = "Isolated" if ("isol" in mm.lower() or mm in ("true", "1")) else "Cross"
-    value = asf(it.get("positionValue") or it.get("notional") or it.get("positionNotional") or it.get("value") or qty * mark, qty * mark)
-    margin = asf(it.get("positionMargin") or it.get("isolatedMargin") or it.get("margin") or (value / lev if lev > 0 else 0), (value / lev if lev > 0 else 0))
-    if lev <= 0:
-        lev = (value / margin) if margin > 0 else 1.0
-    u_pct = (upl / margin * 100) if margin else 0
-
-    return {
-        "symbol": symbol,
-        "base": base_asset(symbol),
-        "side": side,
-        "qty": qty,
-        "entry_price": entry,
-        "mark_price": mark,
-        "u_pnl": upl,
-        "r_pnl": rpl,
-        "leverage": lev,
-        "margin_mode": margin_mode,
-        "value": value,
-        "margin": margin,
-        "u_pnl_pct": u_pct,
-        "raw": it,
-    }
+    margin_mode = "Isolated" if ("isol" in mm.lower() or mm in ("true","1")) else "Cross"
+    value = asf(it.get("positionValue") or it.get("notional") or it.get("positionNotional") or it.get("value") or qty*mark, qty*mark)
+    margin = asf(it.get("positionMargin") or it.get("isolatedMargin") or it.get("margin") or (value/lev if lev>0 else 0), (value/lev if lev>0 else 0))
+    if lev <= 0: lev = (value/margin) if margin>0 else 1.0
+    u_pct = (upl/margin*100) if margin else 0
+    return {"symbol":symbol,"base":base_asset(symbol),"side":side,"qty":qty,"entry_price":entry,"mark_price":mark,
+            "u_pnl":upl,"r_pnl":rpl,"leverage":lev,"margin_mode":margin_mode,"value":value,"margin":margin,"u_pnl_pct":u_pct,"raw":it}
 
 def fetch_positions() -> List[Dict[str, Any]]:
     out = []
     for it in fetch_positions_raw():
         n = norm_pos(it)
-        if n:
-            out.append(n)
+        if n: out.append(n)
     return out
 
 def fetch_income(symbol: str, start_ms: int, end_ms: int) -> List[Dict[str, Any]]:
-    eps = ["/openApi/swap/v2/user/income", "/openApi/swap/v1/user/income", "/openApi/swap/v2/user/income/list"]
+    eps = ["/openApi/swap/v2/user/income","/openApi/swap/v1/user/income","/openApi/swap/v2/user/income/list"]
     p = {"symbol": symbol, "startTime": start_ms, "endTime": end_ms, "limit": 200}
     for ep in eps:
         j = bingx_req(ep, p)
-        if not j:
-            continue
+        if not j: continue
         arr = data_list(j.get("data", j))
-        if arr:
-            return arr
+        if arr: return arr
     return []
 
 # ===== Template Lock =====
-def tpl_open(p: Dict[str, Any]) -> str:
-    head = "📈 *포지션 오픈*" if p["side"] == "Long" else "📉 *포지션 오픈*"
+def tpl_open(p: Dict[str,Any]) -> str:
+    head = "📈 *포지션 오픈*" if p["side"]=="Long" else "📉 *포지션 오픈*"
     return (
         f"{head}\n"
         f"━━━━━━━━━━━━━━\n"
@@ -493,7 +314,7 @@ def tpl_open(p: Dict[str, Any]) -> str:
         f"🕒 {to_kst()}"
     )
 
-def tpl_add(prev: Dict[str, Any], cur: Dict[str, Any]) -> str:
+def tpl_add(prev: Dict[str,Any], cur: Dict[str,Any]) -> str:
     return (
         f"➕ *포지션 추가 진입*\n"
         f"━━━━━━━━━━━━━━\n"
@@ -508,8 +329,8 @@ def tpl_add(prev: Dict[str, Any], cur: Dict[str, Any]) -> str:
         f"🕒 {to_kst()}"
     )
 
-def tpl_close(sess: Dict[str, Any], close_price: float, closed: float, fee: float, realized: float) -> str:
-    st = iso_parse(sess.get("start_ts", "")) or now_kst()
+def tpl_close(sess: Dict[str,Any], close_price: float, closed: float, fee: float, realized: float) -> str:
+    st = iso_parse(sess.get("start_ts","")) or now_kst()
     en = now_kst()
     period = f"{st.astimezone(KST).strftime('%m-%d %H:%M')} ~ {en.astimezone(KST).strftime('%H:%M')} (KST)"
     return (
@@ -528,22 +349,22 @@ def tpl_close(sess: Dict[str, Any], close_price: float, closed: float, fee: floa
         f"🕒 {to_kst(en)}"
     )
 
-def tpl_barcode(side, symbol, price, tf, ts):
-    title = "🟢🐋 *바코드 · 매수(LONG)*" if side == "buy" else "🔴🐋 *바코드 · 매도(Shot)*"
+def tpl_barcode(side,symbol,price,tf,ts):
+    title = "🟢🐋 *바코드 · 매수(Long)*" if side=="buy" else "🔴🐋 *바코드 · 매도(Shot)*"
     return f"{title}\n{symbol} | {price} | {tf}\n_\"바코드 신호는 보조근거로 활용하시길 권장드립니다.\"_\n🕒 {to_kst(ts)}"
 
-def tpl_prism(side, symbol, lo, hi, ts):
-    title = "🟢 *구간 4 지지 준비 (Prism)* 🟢 " if side == "buy" else "🔴 *구간 4 저항 준비 (Prism)* 🔴 "
+def tpl_prism(side,symbol,lo,hi,ts):
+    title = "🟢 *구간 4 지지 준비 (Prism)* 🟢 " if side=="buy" else "🔴 *구간 4 저항 준비 (Prism)* 🔴 "
     return f"{title}\n{symbol} | {lo} ~ {hi}\n_\"분할 진입을 권장드립니다.\"_ \n🕒 {to_kst(ts)}"
 
-def tpl_rsi(side, symbol, price, tf, fire, ts):
-    title = f"🟢 *RSI · 매수(LONG) · {fire}*" if side == "buy" else f"🔴 *RSI · 매도(Shot) · {fire}*"
+def tpl_rsi(side,symbol,price,tf,fire,ts):
+    title = f"🟢 *RSI · 매수(LONG) · {fire}*" if side=="buy" else f"🔴 *RSI · 매도(Shot) · {fire}*"
     return f"{title}\n{symbol} | {price} | {tf}\n_\"RSI 신호는 보조근거로 활용하시길 권장드립니다.\"_ \n🕒 {to_kst(ts)}"
 
-# 요청사항: 판테라 문구/노랑별 그대로 유지
-def tpl_panterra(side, symbol, price, tf, ts):
+# 요청사항 유지: 판테라 문구/노랑별/노랑 표기 절대 유지
+def tpl_panterra(side,symbol,price,tf,ts):
     strategy = "PanTerra"
-    if side == "buy":
+    if side=="buy":
         return (
             f"*🟢🐋[ 매수(Long) 알림 ] ({strategy})🐋*\n"
             f"{symbol} | {price} | {tf}\n"
@@ -564,28 +385,28 @@ def tpl_panterra(side, symbol, price, tf, ts):
     )
 
 HELP_TEXT = (
-    "🧭 *도움말 (/help)*\n"
-    "━━━━━━━━━━━━━━\n"
-    "/status - 스위치/리포트 상태 확인\n"
-    "/help - 도움말\n\n"
-    "/sig_on - 시그널 그룹 알림 ON\n"
-    "/sig_off - 시그널 그룹 알림 OFF\n"
-    "/pos_on - 포지션 그룹 알림 ON\n"
-    "/pos_off - 포지션 그룹 알림 OFF\n\n"
-    "/report_summary - 당일 요약 리포트\n"
-    "/report_detail - 당일 상세 리포트\n"
-    "/report - 당일 요약 리포트\n"
-    "/report YYYY-MM-DD - 해당일 요약 리포트\n\n"
-    "/report_auto_on - 자동 리포트 ON(매시 55분)\n"
-    "/report_auto_off - 자동 리포트 OFF\n"
-    "/report_auto_status - 자동 리포트 상태\n\n"
-    "/say 내용 - 포지션 수신방 공지\n"
-    "/say_sig 내용 - 시그널 수신방 공지\n"
-    "/say_pos 내용 - 포지션 수신방 공지\n"
-    "/switch_logs [N] - 최근 스위치 로그\n"
-    "/pos_snapshot - 현재 포지션 스냅샷\n"
-    "/state_reset - 내부 상태 초기화(주의)\n\n"
-    "🕒 {now}"
+"🧭 *도움말 (/help)*\n"
+"━━━━━━━━━━━━━━\n"
+"/status - 스위치/리포트 상태 확인\n"
+"/help - 도움말\n\n"
+"/sig_on - 시그널 그룹 알림 ON\n"
+"/sig_off - 시그널 그룹 알림 OFF\n"
+"/pos_on - 포지션 그룹 알림 ON\n"
+"/pos_off - 포지션 그룹 알림 OFF\n\n"
+"/report_summary - 당일 요약 리포트\n"
+"/report_detail - 당일 상세 리포트\n"
+"/report - 당일 요약 리포트\n"
+"/report YYYY-MM-DD - 해당일 요약 리포트\n\n"
+"/report_auto_on - 자동 리포트 ON(매시 55분)\n"
+"/report_auto_off - 자동 리포트 OFF\n"
+"/report_auto_status - 자동 리포트 상태\n\n"
+"/say 내용 - 포지션 수신방 공지\n"
+"/say_sig 내용 - 시그널 수신방 공지\n"
+"/say_pos 내용 - 포지션 수신방 공지\n"
+"/switch_logs [N] - 최근 스위치 로그\n"
+"/pos_snapshot - 현재 포지션 스냅샷\n"
+"/state_reset - 내부 상태 초기화(주의)\n\n"
+"🕒 {now}"
 )
 
 # ===== Signal Parse =====
@@ -610,8 +431,8 @@ def _parse_plain_text_payload(raw: str) -> Dict[str, Any]:
     except:
         pass
 
-    # 2) querystring (key=value 또는 key=value&...)
-    if "=" in raw and "\n" not in raw:
+    # 2) querystring
+    if "=" in raw and "&" in raw and "\n" not in raw:
         try:
             qs = parse_qs(raw, keep_blank_values=True)
             for k, v in qs.items():
@@ -642,147 +463,95 @@ def _parse_plain_text_payload(raw: str) -> Dict[str, Any]:
     out["text"] = raw
     return out
 
-def _merge_embedded_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    [FIX] payload/message/data 안에 JSON 문자열이 들어있는 경우 펼쳐서 병합
-    """
-    if not isinstance(payload, dict):
-        return {}
-
-    merged = dict(payload)
-
-    for key in ("payload", "data", "message"):
-        val = merged.get(key)
-        if not isinstance(val, str):
-            continue
-        txt = val.strip()
-        if not txt:
-            continue
-
-        # JSON dict 우선
-        try:
-            j = json.loads(txt)
-            if isinstance(j, dict):
-                for k, v in j.items():
-                    if k not in merged or merged.get(k) in ("", None):
-                        merged[k] = v
-                merged["text"] = merged.get("text") or txt
-                continue
-        except:
-            pass
-
-        # plain key:value 도전
-        p = _parse_plain_text_payload(txt)
-        if isinstance(p, dict) and p:
-            for k, v in p.items():
-                if k not in merged or merged.get(k) in ("", None):
-                    merged[k] = v
-            merged["text"] = merged.get("text") or txt
-
-    return merged
-
 def parse_tv_payload(req) -> Dict[str, Any]:
-    # 1) JSON body
+    # JSON 우선
     j = req.get_json(silent=True)
     if isinstance(j, dict):
-        return _merge_embedded_payload(j)
+        return j
 
-    # 2) form-data/x-www-form-urlencoded
+    # form-data 대응
     try:
         if req.form:
-            d = {}
-            for k in req.form.keys():
-                vals = req.form.getlist(k)
-                d[k] = vals[-1] if vals else req.form.get(k)
+            d = dict(req.form)
             if d:
-                return _merge_embedded_payload(d)
+                return d
     except:
         pass
 
-    # 3) raw text/plain
-    raw = (req.get_data() or b"").decode("utf-8", errors="ignore")
+    # text/plain 대응
+    raw = (req.data or b"").decode("utf-8", errors="ignore")
     p = _parse_plain_text_payload(raw)
     if p:
-        return _merge_embedded_payload(p)
-
+        return p
     return {}
 
-def infer_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
+def infer_signal(payload: Dict[str,Any]) -> Dict[str,Any]:
+    payload = dict(payload or {})
+
+    # [FIX] TradingView가 message 안에 JSON 문자열로 넣는 경우 병합
+    msg_obj = pjson(payload.get("message"), None)
+    if isinstance(msg_obj, dict):
+        for k, v in msg_obj.items():
+            if payload.get(k) in (None, "", "-"):
+                payload[k] = v
+
     symbol = payload.get("symbol") or payload.get("ticker") or payload.get("pair") or payload.get("market") or payload.get("instrument") or "BYBIT·BTCUSDT.P"
     tf = str(payload.get("interval") or payload.get("timeframe") or payload.get("tf") or payload.get("period") or "1m")
     price = payload.get("price") or payload.get("close") or payload.get("last") or payload.get("entry") or payload.get("mark") or "-"
     action = str(payload.get("action") or payload.get("side") or payload.get("signal") or payload.get("order_action") or "").lower()
 
     blob = " | ".join([
-        str(payload.get("strategy", "")),
-        str(payload.get("strategy_name", "")),
-        str(payload.get("indicator", "")),
-        str(payload.get("title", "")),
-        str(payload.get("name", "")),
-        str(payload.get("message", "")),
-        str(payload.get("comment", "")),
-        str(payload.get("text", "")),
-        str(payload),
+        str(payload.get("strategy","")), str(payload.get("strategy_name","")), str(payload.get("indicator","")),
+        str(payload.get("title","")), str(payload.get("name","")), str(payload.get("message","")),
+        str(payload.get("comment","")), str(payload.get("text","")), str(payload)
     ]).lower()
 
     kind = "unknown"
     if ("barcode" in blob) or ("바코드" in blob):
         kind = "barcode"
-    elif ("prism" in blob) or ("프리즘" in blob) or ("구간 4 지지 준비" in blob) or ("구간 4 저항 준비" in blob):
+    elif ("prism" in blob) or ("프리즘" in blob):
         kind = "prism"
     elif ("rsi" in blob) or re.search(r"\brsi\b", blob):
         kind = "rsi"
-    elif ("panterra" in blob) or ("판테라" in blob) or re.search(r"pan\s*terra", blob) or ("파랑별" in blob) or ("노랑별" in blob):
+    elif ("panterra" in blob) or ("판테라" in blob) or re.search(r"pan\s*terra", blob):
         kind = "panterra"
 
     side = "buy"
-    if any(x in blob for x in ["short", "sell", "매도", "노란별", "노랑별", "저항", "숏"]):
-        side = "sell"
-    if any(x in action for x in ["sell", "short"]):
-        side = "sell"
-    if any(x in action for x in ["buy", "long"]):
-        side = "buy"
+    if any(x in blob for x in ["short","sell","매도","노란별","저항","숏"]): side = "sell"
+    if any(x in action for x in ["sell","short"]): side = "sell"
+    if any(x in action for x in ["buy","long"]): side = "buy"
 
     lo = payload.get("low") or payload.get("support_low") or payload.get("zone_low") or payload.get("from") or payload.get("min")
     hi = payload.get("high") or payload.get("support_high") or payload.get("zone_high") or payload.get("to") or payload.get("max")
-    if lo is None:
-        lo = payload.get("zone1") or payload.get("price1") or "-"
-    if hi is None:
-        hi = payload.get("zone2") or payload.get("price2") or "-"
-    fire = "🔥🔥" if str(payload.get("fire") or payload.get("strength") or payload.get("level") or "").strip() in ("2", "high", "strong", "🔥🔥") else "🔥"
+    if lo is None: lo = payload.get("zone1") or payload.get("price1") or "-"
+    if hi is None: hi = payload.get("zone2") or payload.get("price2") or "-"
+    fire = "🔥🔥" if str(payload.get("fire") or payload.get("strength") or payload.get("level") or "").strip() in ("2","high","strong","🔥🔥") else "🔥"
 
     # [FIX] plain text에서 심볼/TF/가격 추출 보조
-    ss = str(symbol).strip() if symbol is not None else ""
-    ttext = str(payload.get("text", ""))
+    if isinstance(symbol, str):
+        ss = symbol.strip()
+    else:
+        ss = str(symbol)
 
     if (not ss) or ss == "BYBIT·BTCUSDT.P":
-        m_sym = re.search(r'([A-Z]{2,20}(?:USDT|USD)(?:\.P|PERP)?)', ttext.upper())
+        m_sym = re.search(r'([A-Z]{2,20}(?:USDT|USD)(?:\.P|PERP)?)', str(payload.get("text","")).upper())
         if m_sym:
             ss = m_sym.group(1)
 
     if tf in ("", "None", "none"):
-        m_tf = re.search(r'\b(\d+\s*[mhdw])\b', ttext.lower())
+        m_tf = re.search(r'\b(\d+\s*[mhdw])\b', str(payload.get("text","")).lower())
         if m_tf:
             tf = m_tf.group(1).replace(" ", "")
 
     if price == "-" or str(price).strip() == "":
-        m_pr = re.search(r'(\d+(?:\.\d+)?)', ttext)
+        m_pr = re.search(r'(\d+(?:\.\d+)?)', str(payload.get("text","")))
         if m_pr:
             price = m_pr.group(1)
 
     if isinstance(ss, str) and "·" not in ss and (ss.endswith(".P") or "USDT" in ss.upper()):
         ss = f"BYBIT·{ss}"
 
-    return {
-        "kind": kind,
-        "side": side,
-        "symbol": str(ss),
-        "tf": tf,
-        "price": price,
-        "low": lo,
-        "high": hi,
-        "fire": fire,
-    }
+    return {"kind":kind,"side":side,"symbol":str(ss),"tf":tf,"price":price,"low":lo,"high":hi,"fire":fire}
 
 def panterra_throttle(symbol: str, side: str, sec=1800) -> bool:
     k = f"throttle:panterra:{symbol}:{side}"
@@ -792,8 +561,7 @@ def panterra_throttle(symbol: str, side: str, sec=1800) -> bool:
     last = R.get(k)
     if last is not None:
         try:
-            if now - int(last) < sec:
-                return True
+            if now - int(last) < sec: return True
         except:
             pass
         R.set(k, str(now))
@@ -806,246 +574,173 @@ def panterra_throttle(symbol: str, side: str, sec=1800) -> bool:
     MEM_THROTTLE[k] = now
     return False
 
-def build_signal_msg(payload: Dict[str, Any]) -> Optional[str]:
-    f = infer_signal(payload)
-    ts = now_kst()
-    if f["kind"] == "barcode":
-        return tpl_barcode(f["side"], f["symbol"], f["price"], f["tf"], ts)
-    if f["kind"] == "prism":
-        return tpl_prism(f["side"], f["symbol"], f["low"], f["high"], ts)
-    if f["kind"] == "rsi":
-        return tpl_rsi(f["side"], f["symbol"], f["price"], f["tf"], f["fire"], ts)
-    if f["kind"] == "panterra":
-        if panterra_throttle(f["symbol"], f["side"]):
-            return None
+def build_signal_msg(payload: Dict[str,Any]) -> Optional[str]:
+    f = infer_signal(payload); ts = now_kst()
+    if f["kind"]=="barcode": return tpl_barcode(f["side"], f["symbol"], f["price"], f["tf"], ts)
+    if f["kind"]=="prism": return tpl_prism(f["side"], f["symbol"], f["low"], f["high"], ts)
+    if f["kind"]=="rsi": return tpl_rsi(f["side"], f["symbol"], f["price"], f["tf"], f["fire"], ts)
+    if f["kind"]=="panterra":
+        if panterra_throttle(f["symbol"], f["side"]): return None
         return tpl_panterra(f["side"], f["symbol"], f["price"], f["tf"], ts)
     return None
 
 # ===== Position state =====
-def pkey(symbol: str, side: str) -> str:
-    return f"{symbol}|{side}"
-
-def open_state() -> Dict[str, Dict[str, Any]]:
-    return rget_json("state:open_positions", {})
-
-def save_open_state(m: Dict[str, Dict[str, Any]]):
-    rset_json("state:open_positions", m)
-
-def init_done() -> bool:
-    return (R.get("state:init_done") or "") == "1"
-
-def mark_init_done():
-    R.set("state:init_done", "1")
-
-def sess_get(k: str) -> Dict[str, Any]:
-    return rget_json(f"sess:position:{k}", {})
-
-def sess_set(k: str, v: Dict[str, Any]):
-    rset_json(f"sess:position:{k}", v)
-
-def sess_del(k: str):
-    R.delete(f"sess:position:{k}")
-
-def hist_key(d: str) -> str:
-    return f"history:trades:{d}"
-
-def hist_push(tr: Dict[str, Any]):
-    d = (iso_parse(tr.get("close_ts", "")) or now_kst()).astimezone(KST).strftime("%Y-%m-%d")
+def pkey(symbol: str, side: str) -> str: return f"{symbol}|{side}"
+def open_state() -> Dict[str, Dict[str,Any]]: return rget_json("state:open_positions", {})
+def save_open_state(m: Dict[str, Dict[str,Any]]): rset_json("state:open_positions", m)
+def init_done() -> bool: return (R.get("state:init_done") or "") == "1"
+def mark_init_done(): R.set("state:init_done","1")
+def sess_get(k: str) -> Dict[str,Any]: return rget_json(f"sess:position:{k}", {})
+def sess_set(k: str, v: Dict[str,Any]): rset_json(f"sess:position:{k}", v)
+def sess_del(k: str): R.delete(f"sess:position:{k}")
+def hist_key(d: str) -> str: return f"history:trades:{d}"
+def hist_push(tr: Dict[str,Any]):
+    d = (iso_parse(tr.get("close_ts","")) or now_kst()).astimezone(KST).strftime("%Y-%m-%d")
     rpush_json(hist_key(d), tr, keep=5000)
-
-def hist_list(d: str) -> List[Dict[str, Any]]:
+def hist_list(d: str) -> List[Dict[str,Any]]:
     out = []
-    for s in R.lrange(hist_key(d), 0, 5000):
+    for s in R.lrange(hist_key(d),0,5000):
         j = pjson(s, None)
-        if isinstance(j, dict):
-            out.append(j)
+        if isinstance(j, dict): out.append(j)
     return out
 
-def fee_calc(symbol: str, st: datetime, en: datetime, closed: float, entry_v: float, exit_v: float) -> Tuple[float, float]:
-    recs = fetch_income(symbol, int(st.astimezone(UTC).timestamp() * 1000), int(en.astimezone(UTC).timestamp() * 1000))
+def fee_calc(symbol: str, st: datetime, en: datetime, closed: float, entry_v: float, exit_v: float) -> Tuple[float,float]:
+    recs = fetch_income(symbol, int(st.astimezone(UTC).timestamp()*1000), int(en.astimezone(UTC).timestamp()*1000))
     if recs:
         ff = 0.0
         for r in recs:
             typ = str(r.get("incomeType") or r.get("type") or r.get("bizType") or "").lower()
             inc = asf(r.get("income") or r.get("profit") or r.get("amount") or 0)
-            if any(x in typ for x in ["commission", "fee", "funding", "fund"]):
-                ff += inc
+            if any(x in typ for x in ["commission","fee","funding","fund"]): ff += inc
         return ff, closed + ff
-    ff = -(abs(entry_v) + abs(exit_v)) * TAKER_FEE_RATE
+    ff = -(abs(entry_v)+abs(exit_v))*TAKER_FEE_RATE
     return ff, closed + ff
 
-def send_signal_alert(text: str) -> Dict[str, int]:
-    # [FIX] 신호 채팅이 비어있을 때 포지션 채팅 fallback
-    targets = CHAT_IDS if CHAT_IDS else CHAT_IDS_POSITION
+# [FIX] 시그널 전송 안정화:
+# 1) CHAT_IDS + CHAT_IDS_POSITION 합친 대상에 전송
+# 2) BOT_TOKEN 실패 시 BOT_TOKEN_POSITION fallback
+def send_signal_alert(text: str) -> Dict[str, Any]:
+    chat_targets = _uniq((CHAT_IDS or []) + (CHAT_IDS_POSITION or []))
+    token_candidates = _uniq([BOT_TOKEN, BOT_TOKEN_POSITION])
+
     sent = 0
-    total = len(targets)
+    failed = []
 
-    for cid in targets:
-        if (not is_group(cid)) or sw_get("signal", cid) == "1":
-            if tg_send(BOT_TOKEN, cid, text):
-                sent += 1
+    for cid in chat_targets:
+        if is_group(cid) and sw_get("signal", cid) != "1":
+            continue
 
-    logging.info("signal alert sent=%s/%s", sent, total)
-    return {"sent": sent, "total": total}
+        ok = False
+        for tk in token_candidates:
+            if tg_send(tk, cid, text):
+                ok = True
+                break
 
-def send_pos_alert(text: str) -> Dict[str, int]:
-    targets = CHAT_IDS_POSITION if CHAT_IDS_POSITION else CHAT_IDS
+        if ok:
+            sent += 1
+        else:
+            failed.append(cid)
+
+    logging.info("signal alert sent=%s/%s failed=%s", sent, len(chat_targets), failed)
+    return {"targets": chat_targets, "sent": sent, "failed": failed, "tokens_used": len(token_candidates)}
+
+def send_pos_alert(text: str):
     sent = 0
-    total = len(targets)
-
-    for cid in targets:
-        if (not is_group(cid)) or sw_get("position", cid) == "1":
+    for cid in CHAT_IDS_POSITION:
+        if (not is_group(cid)) or sw_get("position", cid)=="1":
             if tg_send(BOT_TOKEN_POSITION, cid, text):
                 sent += 1
+    logging.info("position alert sent=%s/%s", sent, len(CHAT_IDS_POSITION))
 
-    logging.info("position alert sent=%s/%s", sent, total)
-    return {"sent": sent, "total": total}
-
-def process_positions(send_alert=True) -> Dict[str, Any]:
+def process_positions(send_alert=True) -> Dict[str,Any]:
     cur = {}
-    for p in fetch_positions():
-        cur[pkey(p["symbol"], p["side"])] = p
+    for p in fetch_positions(): cur[pkey(p["symbol"], p["side"])] = p
     prev = open_state()
 
     if not init_done():
-        for k, p in cur.items():
-            sess_set(k, {
-                "symbol": p["symbol"], "side": p["side"], "base": p["base"],
-                "margin_mode": p["margin_mode"], "leverage": p["leverage"],
-                "start_ts": now_kst().isoformat(), "entry_price_init": p["entry_price"],
-                "last_entry_price": p["entry_price"], "total_entry_value": p["value"],
-                "total_exit_value": 0.0, "last_qty": p["qty"], "last_mark_price": p["mark_price"],
-                "last_r_pnl": p["r_pnl"]
-            })
-        save_open_state(cur)
-        mark_init_done()
-        return {"ok": True, "initial_sync": True, "positions_now": len(cur), "events": {"open": 0, "add": 0, "reduce": 0, "close": 0}, "closed_trades": []}
+        for k,p in cur.items():
+            sess_set(k, {"symbol":p["symbol"],"side":p["side"],"base":p["base"],"margin_mode":p["margin_mode"],"leverage":p["leverage"],
+                         "start_ts":now_kst().isoformat(),"entry_price_init":p["entry_price"],"last_entry_price":p["entry_price"],
+                         "total_entry_value":p["value"],"total_exit_value":0.0,"last_qty":p["qty"],"last_mark_price":p["mark_price"],"last_r_pnl":p["r_pnl"]})
+        save_open_state(cur); mark_init_done()
+        return {"ok":True,"initial_sync":True,"positions_now":len(cur),"events":{"open":0,"add":0,"reduce":0,"close":0},"closed_trades":[]}
 
-    events = {"open": 0, "add": 0, "reduce": 0, "close": 0}
-    closed_rows = []
+    events = {"open":0,"add":0,"reduce":0,"close":0}; closed_rows = []
 
     # open/add/reduce
-    for k, p in cur.items():
+    for k,p in cur.items():
         o = prev.get(k)
         if not o:
             events["open"] += 1
-            sess_set(k, {
-                "symbol": p["symbol"], "side": p["side"], "base": p["base"],
-                "margin_mode": p["margin_mode"], "leverage": p["leverage"],
-                "start_ts": now_kst().isoformat(), "entry_price_init": p["entry_price"],
-                "last_entry_price": p["entry_price"], "total_entry_value": p["value"],
-                "total_exit_value": 0.0, "last_qty": p["qty"], "last_mark_price": p["mark_price"],
-                "last_r_pnl": p["r_pnl"]
-            })
-            if send_alert:
-                send_pos_alert(tpl_open(p))
+            sess_set(k, {"symbol":p["symbol"],"side":p["side"],"base":p["base"],"margin_mode":p["margin_mode"],"leverage":p["leverage"],
+                         "start_ts":now_kst().isoformat(),"entry_price_init":p["entry_price"],"last_entry_price":p["entry_price"],
+                         "total_entry_value":p["value"],"total_exit_value":0.0,"last_qty":p["qty"],"last_mark_price":p["mark_price"],"last_r_pnl":p["r_pnl"]})
+            if send_alert: send_pos_alert(tpl_open(p))
         else:
             q0, q1 = asf(o.get("qty")), asf(p.get("qty"))
-            s = sess_get(k) or {
-                "symbol": p["symbol"], "side": p["side"], "base": p["base"],
-                "margin_mode": p["margin_mode"], "leverage": p["leverage"],
-                "start_ts": now_kst().isoformat(), "entry_price_init": p["entry_price"],
-                "total_entry_value": p["value"], "total_exit_value": 0.0
-            }
-
+            s = sess_get(k) or {"symbol":p["symbol"],"side":p["side"],"base":p["base"],"margin_mode":p["margin_mode"],"leverage":p["leverage"],
+                                "start_ts":now_kst().isoformat(),"entry_price_init":p["entry_price"],"total_entry_value":p["value"],"total_exit_value":0.0}
             if q1 > q0 + 1e-12:
                 events["add"] += 1
-                dv = max(asf(p.get("value")) - asf(o.get("value")), (q1 - q0) * asf(p.get("entry_price")))
-                s["total_entry_value"] = asf(s.get("total_entry_value")) + max(dv, 0.0)
-                if send_alert:
-                    send_pos_alert(tpl_add(o, p))
+                dv = max(asf(p.get("value"))-asf(o.get("value")), (q1-q0)*asf(p.get("entry_price")))
+                s["total_entry_value"] = asf(s.get("total_entry_value")) + max(dv,0.0)
+                if send_alert: send_pos_alert(tpl_add(o,p))
             elif q1 + 1e-12 < q0:
                 events["reduce"] += 1
-                rq = q0 - q1
-                rv = max(asf(o.get("value")) - asf(p.get("value")), rq * asf(p.get("mark_price")))
-                s["total_exit_value"] = asf(s.get("total_exit_value")) + max(rv, 0.0)
-
-            s.update({
-                "last_qty": q1, "last_mark_price": p["mark_price"], "last_entry_price": p["entry_price"],
-                "last_r_pnl": p["r_pnl"], "margin_mode": p["margin_mode"], "leverage": p["leverage"]
-            })
-            sess_set(k, s)
+                rq = q0-q1
+                rv = max(asf(o.get("value"))-asf(p.get("value")), rq*asf(p.get("mark_price")))
+                s["total_exit_value"] = asf(s.get("total_exit_value")) + max(rv,0.0)
+            s.update({"last_qty":q1,"last_mark_price":p["mark_price"],"last_entry_price":p["entry_price"],"last_r_pnl":p["r_pnl"],
+                      "margin_mode":p["margin_mode"],"leverage":p["leverage"]})
+            sess_set(k,s)
 
     # close
-    for k, o in prev.items():
-        if k in cur:
-            continue
+    for k,o in prev.items():
+        if k in cur: continue
         events["close"] += 1
-        s = sess_get(k) or {
-            "symbol": o.get("symbol"), "side": o.get("side"),
-            "base": o.get("base", base_asset(o.get("symbol", ""))),
-            "margin_mode": o.get("margin_mode", "Isolated"), "leverage": o.get("leverage", 1),
-            "start_ts": now_kst().isoformat(), "entry_price_init": o.get("entry_price", 0),
-            "total_entry_value": o.get("value", 0), "total_exit_value": 0.0
-        }
-
-        remain_qty = asf(o.get("qty"))
-        close_p = asf(o.get("mark_price") or o.get("entry_price"))
-        s["total_exit_value"] = asf(s.get("total_exit_value")) + max(remain_qty * close_p, 0.0)
-
+        s = sess_get(k) or {"symbol":o.get("symbol"),"side":o.get("side"),"base":o.get("base", base_asset(o.get("symbol",""))),
+                            "margin_mode":o.get("margin_mode","Isolated"),"leverage":o.get("leverage",1),"start_ts":now_kst().isoformat(),
+                            "entry_price_init":o.get("entry_price",0),"total_entry_value":o.get("value",0),"total_exit_value":0.0}
+        remain_qty = asf(o.get("qty")); close_p = asf(o.get("mark_price") or o.get("entry_price"))
+        s["total_exit_value"] = asf(s.get("total_exit_value")) + max(remain_qty*close_p,0.0)
         tv_in, tv_out = asf(s.get("total_entry_value")), asf(s.get("total_exit_value"))
-        closed = (tv_out - tv_in) if s.get("side") == "Long" else (tv_in - tv_out)
-
-        st = iso_parse(s.get("start_ts", "")) or now_kst()
-        en = now_kst()
-        fee, real = fee_calc(s.get("symbol", ""), st, en, closed, tv_in, tv_out)
-
-        row = {
-            "symbol": s.get("symbol"), "side": s.get("side"),
-            "start_ts": s.get("start_ts"), "close_ts": en.isoformat(),
-            "entry_price": asf(s.get("entry_price_init")), "close_price": close_p,
-            "total_entry_value": tv_in, "total_exit_value": tv_out,
-            "closed_pnl": float(f"{closed:.8f}"), "fee_funding": float(f"{fee:.8f}"), "realized": float(f"{real:.8f}"),
-            "margin_mode": s.get("margin_mode", "Isolated"), "leverage": s.get("leverage", 1)
-        }
-        hist_push(row)
-        closed_rows.append(row)
-
-        if send_alert:
-            send_pos_alert(tpl_close({
-                "symbol": row["symbol"], "side": row["side"],
-                "margin_mode": row["margin_mode"], "leverage": row["leverage"],
-                "start_ts": row["start_ts"], "entry_price_init": row["entry_price"],
-                "total_entry_value": row["total_entry_value"], "total_exit_value": row["total_exit_value"]
-            }, row["close_price"], row["closed_pnl"], row["fee_funding"], row["realized"]))
-
+        closed = (tv_out-tv_in) if s.get("side")=="Long" else (tv_in-tv_out)
+        st = iso_parse(s.get("start_ts","")) or now_kst(); en = now_kst()
+        fee, real = fee_calc(s.get("symbol",""), st, en, closed, tv_in, tv_out)
+        row = {"symbol":s.get("symbol"),"side":s.get("side"),"start_ts":s.get("start_ts"),"close_ts":en.isoformat(),
+               "entry_price":asf(s.get("entry_price_init")),"close_price":close_p,"total_entry_value":tv_in,"total_exit_value":tv_out,
+               "closed_pnl":float(f"{closed:.8f}"),"fee_funding":float(f"{fee:.8f}"),"realized":float(f"{real:.8f}"),
+               "margin_mode":s.get("margin_mode","Isolated"),"leverage":s.get("leverage",1)}
+        hist_push(row); closed_rows.append(row)
+        if send_alert: send_pos_alert(tpl_close({
+            "symbol":row["symbol"],"side":row["side"],"margin_mode":row["margin_mode"],"leverage":row["leverage"],
+            "start_ts":row["start_ts"],"entry_price_init":row["entry_price"],"total_entry_value":row["total_entry_value"],"total_exit_value":row["total_exit_value"]
+        }, row["close_price"], row["closed_pnl"], row["fee_funding"], row["realized"]))
         sess_del(k)
 
     save_open_state(cur)
-    return {"ok": True, "positions_now": len(cur), "events": events, "closed_trades": closed_rows}
+    return {"ok":True,"positions_now":len(cur),"events":events,"closed_trades":closed_rows}
 
 # ===== Report =====
-def rows_until(date_str: str, end_dt: datetime) -> List[Dict[str, Any]]:
-    rows = hist_list(date_str)
-    out = []
-    start = datetime.strptime(date_str + " 00:00:00", "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
+def rows_until(date_str: str, end_dt: datetime) -> List[Dict[str,Any]]:
+    rows = hist_list(date_str); out = []
+    start = datetime.strptime(date_str+" 00:00:00","%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
     today = now_kst().strftime("%Y-%m-%d")
-    end_limit = end_dt.astimezone(KST) if date_str == today else datetime.strptime(date_str + " 23:59:59", "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
-
+    end_limit = end_dt.astimezone(KST) if date_str==today else datetime.strptime(date_str+" 23:59:59","%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
     for r in rows:
-        c = iso_parse(r.get("close_ts", ""))
-        if c and start <= c.astimezone(KST) <= end_limit:
-            out.append(r)
+        c = iso_parse(r.get("close_ts",""))
+        if c and start <= c.astimezone(KST) <= end_limit: out.append(r)
     return out
 
-def report_summary_text(date_str: str, now_dt: datetime, rows: List[Dict[str, Any]]) -> str:
-    total = len(rows)
-    win = sum(1 for r in rows if asf(r.get("realized")) > 0)
-    lose = total - win
-    wr = (win / total * 100 if total else 0)
-    s_closed = sum(asf(r.get("closed_pnl")) for r in rows)
-    s_fee = sum(asf(r.get("fee_funding")) for r in rows)
-    s_real = sum(asf(r.get("realized")) for r in rows)
-
+def report_summary_text(date_str: str, now_dt: datetime, rows: List[Dict[str,Any]]) -> str:
+    total = len(rows); win = sum(1 for r in rows if asf(r.get("realized")) > 0); lose = total-win; wr = (win/total*100 if total else 0)
+    s_closed = sum(asf(r.get("closed_pnl")) for r in rows); s_fee = sum(asf(r.get("fee_funding")) for r in rows); s_real = sum(asf(r.get("realized")) for r in rows)
     cnt = {}
     for r in rows:
-        sym = str(r.get("symbol", ""))
-        if sym:
-            cnt[sym] = cnt.get(sym, 0) + 1
-    sym_text = ", ".join([f"{k}({v})" for k, v in sorted(cnt.items())]) if cnt else "-"
-
-    st = f"{date_str[5:]} 00:00"
-    en = now_dt.astimezone(KST).strftime("%H:%M")
+        sym = str(r.get("symbol",""))
+        if sym: cnt[sym] = cnt.get(sym,0)+1
+    sym_text = ", ".join([f"{k}({v})" for k,v in sorted(cnt.items())]) if cnt else "-"
+    st = f"{date_str[5:]} 00:00"; en = now_dt.astimezone(KST).strftime("%H:%M")
     return (
         f"📊 *일일 요약 리포트*\n"
         f"━━━━━━━━━━━━━━\n"
@@ -1058,28 +753,15 @@ def report_summary_text(date_str: str, now_dt: datetime, rows: List[Dict[str, An
         f"🕒 {to_kst(now_dt)}"
     )
 
-def report_detail_text(date_str: str, now_dt: datetime, rows: List[Dict[str, Any]]) -> str:
-    st = f"{date_str[5:]} 00:00"
-    en = now_dt.astimezone(KST).strftime("%H:%M")
-    s_closed = sum(asf(r.get("closed_pnl")) for r in rows)
-    s_fee = sum(asf(r.get("fee_funding")) for r in rows)
-    s_real = sum(asf(r.get("realized")) for r in rows)
-
-    p = ["📑 *일일 상세 리포트*", "━━━━━━━━━━━━━━", f"기간 : {st} ~ {en} (KST)", ""]
+def report_detail_text(date_str: str, now_dt: datetime, rows: List[Dict[str,Any]]) -> str:
+    st = f"{date_str[5:]} 00:00"; en = now_dt.astimezone(KST).strftime("%H:%M")
+    s_closed = sum(asf(r.get("closed_pnl")) for r in rows); s_fee = sum(asf(r.get("fee_funding")) for r in rows); s_real = sum(asf(r.get("realized")) for r in rows)
+    p = ["📑 *일일 상세 리포트*","━━━━━━━━━━━━━━",f"기간 : {st} ~ {en} (KST)",""]
     if not rows:
-        p += [
-            "해당 기간 거래 내역이 없습니다.", "",
-            "━━━━━━━━━━━━━━",
-            f"합계 Closed PnL : {sign(0)} USDT",
-            f"합계 Fee+Funding: {sign(0)} USDT",
-            f"*총 Realized     : {sign(0)} USDT*",
-            f"🕒 {to_kst(now_dt)}",
-        ]
+        p += ["해당 기간 거래 내역이 없습니다.","","━━━━━━━━━━━━━━",f"합계 Closed PnL : {sign(0)} USDT",f"합계 Fee+Funding: {sign(0)} USDT",f"*총 Realized     : {sign(0)} USDT*",f"🕒 {to_kst(now_dt)}"]
         return "\n".join(p)
-
-    for r in sorted(rows, key=lambda x: x.get("close_ts", "")):
-        sd = iso_parse(r.get("start_ts", "")) or now_dt
-        cd = iso_parse(r.get("close_ts", "")) or now_dt
+    for r in sorted(rows, key=lambda x: x.get("close_ts","")):
+        sd = iso_parse(r.get("start_ts","")) or now_dt; cd = iso_parse(r.get("close_ts","")) or now_dt
         per = f"{sd.astimezone(KST).strftime('%m-%d %H:%M')} ~ {cd.astimezone(KST).strftime('%H:%M')} (KST)"
         p += [
             f"✅ {r.get('symbol','')} ({r.get('side','')})",
@@ -1090,231 +772,155 @@ def report_detail_text(date_str: str, now_dt: datetime, rows: List[Dict[str, Any
             f"총 종료금액 : {fmt_num(asf(r.get('total_exit_value')),2)} USDT",
             f"Closed PnL : {sign(asf(r.get('closed_pnl')))} USDT",
             f"Fee+Funding: {sign(asf(r.get('fee_funding')))} USDT",
-            f"*Realized   : {sign(asf(r.get('realized')))} USDT*",
-            ""
+            f"*Realized   : {sign(asf(r.get('realized')))} USDT*",""
         ]
-
-    p += [
-        "━━━━━━━━━━━━━━",
-        f"합계 Closed PnL : {sign(s_closed)} USDT",
-        f"합계 Fee+Funding: {sign(s_fee)} USDT",
-        f"*총 Realized     : {sign(s_real)} USDT*",
-        f"🕒 {to_kst(now_dt)}",
-    ]
+    p += ["━━━━━━━━━━━━━━",f"합계 Closed PnL : {sign(s_closed)} USDT",f"합계 Fee+Funding: {sign(s_fee)} USDT",f"*총 Realized     : {sign(s_real)} USDT*",f"🕒 {to_kst(now_dt)}"]
     return "\n".join(p)
 
-def send_report_summary(chat_id: str, date_str: Optional[str] = None):
-    now = now_kst()
-    date_str = date_str or now.strftime("%Y-%m-%d")
+def send_report_summary(chat_id: str, date_str: Optional[str]=None):
+    now = now_kst(); date_str = date_str or now.strftime("%Y-%m-%d")
     tg_send(BOT_TOKEN_POSITION, chat_id, report_summary_text(date_str, now, rows_until(date_str, now)))
-
-def send_report_detail(chat_id: str, date_str: Optional[str] = None):
-    now = now_kst()
-    date_str = date_str or now.strftime("%Y-%m-%d")
+def send_report_detail(chat_id: str, date_str: Optional[str]=None):
+    now = now_kst(); date_str = date_str or now.strftime("%Y-%m-%d")
     tg_send_chunk(BOT_TOKEN_POSITION, chat_id, report_detail_text(date_str, now, rows_until(date_str, now)))
 
-def maybe_auto_report() -> Dict[str, Any]:
+def maybe_auto_report() -> Dict[str,Any]:
     cfg_init()
-    if cfg_get("report_auto", "off").lower() != "on":
-        return {"sent": False, "reason": "auto_off"}
-
-    minute = asi(cfg_get("report_auto_minute", str(REPORT_AUTO_MINUTE_DEFAULT)), REPORT_AUTO_MINUTE_DEFAULT)
+    if cfg_get("report_auto","off").lower() != "on": return {"sent":False,"reason":"auto_off"}
+    minute = asi(cfg_get("report_auto_minute",str(REPORT_AUTO_MINUTE_DEFAULT)), REPORT_AUTO_MINUTE_DEFAULT)
     now = now_kst()
-    if now.minute != minute:
-        return {"sent": False, "reason": "not_target_minute"}
-
+    if now.minute != minute: return {"sent":False,"reason":"not_target_minute"}
     slot = now.strftime("%Y-%m-%d %H:%M")
-    if cfg_get("report_auto_last_slot", "") == slot:
-        return {"sent": False, "reason": "already_sent"}
-
-    chat = cfg_get("report_auto_chat", "")
-    if not chat:
-        return {"sent": False, "reason": "no_target_chat"}
-
+    if cfg_get("report_auto_last_slot","") == slot: return {"sent":False,"reason":"already_sent"}
+    chat = cfg_get("report_auto_chat","")
+    if not chat: return {"sent":False,"reason":"no_target_chat"}
     send_report_summary(chat, now.strftime("%Y-%m-%d"))
     cfg_set("report_auto_last_slot", slot)
-    return {"sent": True, "slot": slot, "chat_id": chat}
+    return {"sent":True,"slot":slot,"chat_id":chat}
 
 # ===== Command =====
-def parse_cmd(text: str) -> Tuple[str, str]:
+def parse_cmd(text: str) -> Tuple[str,str]:
     t = (text or "").strip()
-    if not t.startswith("/"):
-        return "", ""
+    if not t.startswith("/"): return "",""
     first, *rest = t.split(maxsplit=1)
-    return first.split("@", 1)[0].lower(), (rest[0].strip() if rest else "")
+    return first.split("@",1)[0].lower(), (rest[0].strip() if rest else "")
 
 def status_text() -> str:
     cfg_init()
-    lines = ["🧾 *현재 상태 (/status)*", "━━━━━━━━━━━━━━"]
-
+    lines = ["🧾 *현재 상태 (/status)*","━━━━━━━━━━━━━━"]
     for cid in CHAT_IDS:
-        if is_group(cid):
-            lines.append(f"Signal Group : {cid} : {'ON' if sw_get('signal', cid) == '1' else 'OFF'}")
+        if is_group(cid): lines.append(f"Signal Group : {cid} : {'ON' if sw_get('signal',cid)=='1' else 'OFF'}")
     for cid in CHAT_IDS_POSITION:
-        if is_group(cid):
-            lines.append(f"Position Group : {cid} : {'ON' if sw_get('position', cid) == '1' else 'OFF'}")
-
-    lines += [
-        "",
-        f"Report Auto : {cfg_get('report_auto','off').upper()} (매시 {cfg_get('report_auto_minute', str(REPORT_AUTO_MINUTE_DEFAULT))}분)",
-        f"Report Chat : {cfg_get('report_auto_chat','-')}",
-        "",
-        f"🕒 {to_kst()}",
-    ]
+        if is_group(cid): lines.append(f"Position Group : {cid} : {'ON' if sw_get('position',cid)=='1' else 'OFF'}")
+    lines += ["", f"Report Auto : {cfg_get('report_auto','off').upper()} (매시 {cfg_get('report_auto_minute',str(REPORT_AUTO_MINUTE_DEFAULT))}분)",
+              f"Report Chat : {cfg_get('report_auto_chat','-')}", "", f"🕒 {to_kst()}"]
     return "\n".join(lines)
 
 def toggle_groups(kind: str, on: bool) -> str:
-    ids = CHAT_IDS if kind == "signal" else CHAT_IDS_POSITION
+    ids = CHAT_IDS if kind=="signal" else CHAT_IDS_POSITION
     gs = [c for c in ids if is_group(c)]
-    if not gs:
-        return "그룹 chat_id가 없습니다."
-    for g in gs:
-        sw_set(kind, g, on)
-    return f"✅ {'시그널' if kind == 'signal' else '포지션'} 그룹 알림을 *{'ON' if on else 'OFF'}* 으로 설정했어."
+    if not gs: return "그룹 chat_id가 없습니다."
+    for g in gs: sw_set(kind, g, on)
+    return f"✅ {'시그널' if kind=='signal' else '포지션'} 그룹 알림을 *{'ON' if on else 'OFF'}* 으로 설정했어."
 
 def switch_logs(n=10) -> str:
-    n = max(1, min(50, n))
-    raw = R.lrange("logs:switch", 0, n - 1)
-    if not raw:
-        return "최근 스위치 로그가 없어."
-    lines = [f"🧾 *최근 스위치 로그 {len(raw)}건*", "━━━━━━━━━━━━━━"]
+    n = max(1,min(50,n))
+    raw = R.lrange("logs:switch",0,n-1)
+    if not raw: return "최근 스위치 로그가 없어."
+    lines = [f"🧾 *최근 스위치 로그 {len(raw)}건*","━━━━━━━━━━━━━━"]
     for s in raw:
-        j = pjson(s, {})
-        dt = iso_parse(j.get("ts", "")) or now_kst()
+        j = pjson(s,{})
+        dt = iso_parse(j.get("ts","")) or now_kst()
         lines.append(f"- {hm(dt)} | {j.get('cmd','')} | uid:{j.get('uid','-')} | {j.get('note','')}")
     lines += ["", f"🕒 {to_kst()}"]
     return "\n".join(lines)
 
 def snapshot_text() -> str:
     ps = fetch_positions()
-    if not ps:
-        return f"📭 현재 오픈 포지션이 없어.\n\n🕒 {to_kst()}"
-    lines = ["📌 *현재 포지션 스냅샷*", "━━━━━━━━━━━━━━"]
+    if not ps: return f"📭 현재 오픈 포지션이 없어.\n\n🕒 {to_kst()}"
+    lines = ["📌 *현재 포지션 스냅샷*","━━━━━━━━━━━━━━"]
     for p in ps:
-        lines += [
-            f"{p['symbol']} | {p['side']}",
-            f"Entry {fmt_price(p['entry_price'])} | Pos {fmt_qty(p['qty'])} {p['base']}",
-            f"uPnL {sign(p['u_pnl'])} ({pct(p['u_pnl_pct'])}) | rPnL {sign(p['r_pnl'])}",
-            "",
-        ]
+        lines += [f"{p['symbol']} | {p['side']}",
+                  f"Entry {fmt_price(p['entry_price'])} | Pos {fmt_qty(p['qty'])} {p['base']}",
+                  f"uPnL {sign(p['u_pnl'])} ({pct(p['u_pnl_pct'])}) | rPnL {sign(p['r_pnl'])}",""]
     lines.append(f"🕒 {to_kst()}")
     return "\n".join(lines).strip()
 
 def state_reset() -> str:
-    R.delete("state:open_positions")
-    R.delete("state:init_done")
+    R.delete("state:open_positions"); R.delete("state:init_done")
     return f"⚠️ state:open_positions / state:init_done 초기화 완료\n🕒 {to_kst()}"
 
 def handle_command(chat_id: str, uid: str, text: str) -> Optional[str]:
-    cmd, arg = parse_cmd(text)
-    if not cmd:
-        return None
-
-    if cmd == "/help":
-        return HELP_TEXT.format(now=to_kst())
-    if cmd == "/status":
-        return status_text()
+    cmd,arg = parse_cmd(text)
+    if not cmd: return None
+    if cmd == "/help": return HELP_TEXT.format(now=to_kst())
+    if cmd == "/status": return status_text()
 
     # report 조회는 누구나 가능
-    if cmd in ("/report_summary", "/report"):
+    if cmd in ("/report_summary","/report"):
         d = arg if re.match(r"^\d{4}-\d{2}-\d{2}$", arg or "") else None
-        send_report_summary(chat_id, d)
-        return None
-
+        send_report_summary(chat_id, d); return None
     if cmd == "/report_detail":
         d = arg if re.match(r"^\d{4}-\d{2}-\d{2}$", arg or "") else None
-        send_report_detail(chat_id, d)
-        return None
-
+        send_report_detail(chat_id, d); return None
     if cmd == "/report_auto_status":
-        return (
-            "🧾 자동 리포트 상태\n━━━━━━━━━━━━━━\n"
-            f"상태 : {cfg_get('report_auto','off').upper()}\n"
-            f"분   : {cfg_get('report_auto_minute',str(REPORT_AUTO_MINUTE_DEFAULT))}\n"
-            f"대상 : {cfg_get('report_auto_chat','-')}\n"
-            f"최근발송 : {cfg_get('report_auto_last_slot','-')}\n\n🕒 {to_kst()}"
-        )
+        return ("🧾 자동 리포트 상태\n━━━━━━━━━━━━━━\n"
+                f"상태 : {cfg_get('report_auto','off').upper()}\n"
+                f"분   : {cfg_get('report_auto_minute',str(REPORT_AUTO_MINUTE_DEFAULT))}\n"
+                f"대상 : {cfg_get('report_auto_chat','-')}\n"
+                f"최근발송 : {cfg_get('report_auto_last_slot','-')}\n\n🕒 {to_kst()}")
 
     # 이하 관리자
-    if not is_admin(uid):
-        return "권한이 없어. (ADMIN_USER_IDS 확인)"
-
-    if cmd == "/sig_on":
-        switch_log(cmd, uid, "signal on")
-        return toggle_groups("signal", True)
-    if cmd == "/sig_off":
-        switch_log(cmd, uid, "signal off")
-        return toggle_groups("signal", False)
-    if cmd == "/pos_on":
-        switch_log(cmd, uid, "position on")
-        return toggle_groups("position", True)
-    if cmd == "/pos_off":
-        switch_log(cmd, uid, "position off")
-        return toggle_groups("position", False)
-
-    if cmd == "/report_auto_on":
-        cfg_set("report_auto", "on")
-        return "✅ 자동 리포트 ON (매시 55분, 요약본)"
-    if cmd == "/report_auto_off":
-        cfg_set("report_auto", "off")
-        return "✅ 자동 리포트 OFF"
-
-    if cmd in ("/say", "/say_pos"):
+    if not is_admin(uid): return "권한이 없어. (ADMIN_USER_IDS 확인)"
+    if cmd == "/sig_on": switch_log(cmd, uid, "signal on"); return toggle_groups("signal", True)
+    if cmd == "/sig_off": switch_log(cmd, uid, "signal off"); return toggle_groups("signal", False)
+    if cmd == "/pos_on": switch_log(cmd, uid, "position on"); return toggle_groups("position", True)
+    if cmd == "/pos_off": switch_log(cmd, uid, "position off"); return toggle_groups("position", False)
+    if cmd == "/report_auto_on": cfg_set("report_auto","on"); return "✅ 자동 리포트 ON (매시 55분, 요약본)"
+    if cmd == "/report_auto_off": cfg_set("report_auto","off"); return "✅ 자동 리포트 OFF"
+    if cmd in ("/say","/say_pos"):
         m = (arg or "").strip()
-        if not m:
-            return "사용법: /say 내용"
-        for cid in CHAT_IDS_POSITION:
-            tg_send(BOT_TOKEN_POSITION, cid, m)
+        if not m: return "사용법: /say 내용"
+        for cid in CHAT_IDS_POSITION: tg_send(BOT_TOKEN_POSITION, cid, m)
         return "✅ 포지션 수신방 공지 전송 완료"
-
     if cmd == "/say_sig":
         m = (arg or "").strip()
-        if not m:
-            return "사용법: /say_sig 내용"
-        for cid in CHAT_IDS:
-            tg_send(BOT_TOKEN, cid, m)
+        if not m: return "사용법: /say_sig 내용"
+        for cid in CHAT_IDS: tg_send(BOT_TOKEN, cid, m)
         return "✅ 시그널 수신방 공지 전송 완료"
-
     if cmd == "/switch_logs":
         n = int(arg) if (arg or "").isdigit() else 10
         return switch_logs(n)
-
-    if cmd == "/pos_snapshot":
-        return snapshot_text()
-
-    if cmd == "/state_reset":
-        return state_reset()
-
-    if cmd == "/health_check":
-        return f"ok\n🕒 {to_kst()}"
-
+    if cmd == "/pos_snapshot": return snapshot_text()
+    if cmd == "/state_reset": return state_reset()
+    if cmd == "/health_check": return f"ok\n🕒 {to_kst()}"
     return "알 수 없는 명령어야. /help 확인해줘."
 
-def parse_update(update: Dict[str, Any]) -> Tuple[str, str, str]:
+def parse_update(update: Dict[str,Any]) -> Tuple[str,str,str]:
     m = update.get("message") or update.get("edited_message") or {}
-    c = m.get("chat", {}) if isinstance(m, dict) else {}
-    u = m.get("from", {}) if isinstance(m, dict) else {}
-    return str(c.get("id", "")), str(u.get("id", "")), (m.get("text") or "").strip()
+    c = m.get("chat",{}) if isinstance(m,dict) else {}
+    u = m.get("from",{}) if isinstance(m,dict) else {}
+    return str(c.get("id","")), str(u.get("id","")), (m.get("text") or "").strip()
 
 # ===== Routes =====
 @app.route("/", methods=["GET"])
 def root():
     cfg_init()
-    return jsonify({"ok": True, "service": "tv-telegram-bot", "time": to_kst()})
+    return jsonify({"ok":True,"service":"tv-telegram-bot","time":to_kst()})
 
-@app.route("/tv-webhook", methods=["POST"])
-def tv_webhook():
+def _handle_tv_webhook():
     payload = parse_tv_payload(request)
 
-    # [FIX] secret를 query/body/header 모두 허용
+    # secret는 query/body/header 모두 허용
     req_secret = (
-        request.args.get("secret", "")
-        or str(payload.get("secret", ""))
-        or str(payload.get("passphrase", ""))
-        or request.headers.get("X-Webhook-Secret", "")
+        request.args.get("secret","")
+        or str(payload.get("secret",""))
+        or str(payload.get("passphrase",""))
+        or request.headers.get("X-Webhook-Secret","")
     )
     if TV_WEBHOOK_SECRET and req_secret != TV_WEBHOOK_SECRET:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+        logging.warning("tv-webhook unauthorized (secret mismatch)")
+        return jsonify({"ok":False,"error":"unauthorized"}), 401
 
     if not isinstance(payload, dict):
         payload = {}
@@ -1323,12 +929,11 @@ def tv_webhook():
     inf = infer_signal(payload)
 
     if msg:
-        result = send_signal_alert(msg)
+        deliver = send_signal_alert(msg)
         return jsonify({
             "ok": True,
-            "sent": result["sent"] > 0,
-            "sent_count": result["sent"],
-            "target_count": result["total"],
+            "sent": deliver.get("sent", 0) > 0,
+            "deliver": deliver,
             "infer": inf
         })
 
@@ -1337,94 +942,82 @@ def tv_webhook():
         "sent": False,
         "reason": "ignored_or_throttled_or_unknown",
         "infer": inf,
-        "payload_keys": sorted(list(payload.keys()))[:30]
+        "keys": list(payload.keys())
     })
+
+@app.route("/tv-webhook", methods=["POST"])
+def tv_webhook():
+    return _handle_tv_webhook()
+
+# [FIX] 예전 경로 호환 (/webhook 쓰는 기존 알림도 수신)
+@app.route("/webhook", methods=["POST"])
+def tv_webhook_legacy():
+    return _handle_tv_webhook()
 
 @app.route("/tg/position", methods=["POST"])
 def tg_position():
-    if TG_CONTROL_SECRET and request.args.get("secret", "") != TG_CONTROL_SECRET:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
-
+    if TG_CONTROL_SECRET and request.args.get("secret","") != TG_CONTROL_SECRET:
+        return jsonify({"ok":False,"error":"unauthorized"}), 401
     upd = request.get_json(silent=True) or {}
-    if not isinstance(upd, dict):
-        return jsonify({"ok": True, "ignored": True})
-
+    if not isinstance(upd, dict): return jsonify({"ok":True,"ignored":True})
     chat_id, uid, text = parse_update(upd)
     if chat_id and text.startswith("/"):
         resp = handle_command(chat_id, uid, text)
-        if resp:
-            tg_send(BOT_TOKEN_POSITION, chat_id, resp)
-
-    return jsonify({"ok": True})
+        if resp: tg_send(BOT_TOKEN_POSITION, chat_id, resp)
+    return jsonify({"ok":True})
 
 @app.route("/tg/signal", methods=["POST"])
 def tg_signal():
-    if TG_CONTROL_SECRET and request.args.get("secret", "") != TG_CONTROL_SECRET:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
-    return jsonify({"ok": True})
+    if TG_CONTROL_SECRET and request.args.get("secret","") != TG_CONTROL_SECRET:
+        return jsonify({"ok":False,"error":"unauthorized"}), 401
+    return jsonify({"ok":True})
 
-@app.route("/positions_check", methods=["GET", "POST"])
+@app.route("/positions_check", methods=["GET","POST"])
 def positions_check():
-    if POSITIONS_CHECK_TOKEN and request.args.get("token", "") != POSITIONS_CHECK_TOKEN:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
-
+    if POSITIONS_CHECK_TOKEN and request.args.get("token","") != POSITIONS_CHECK_TOKEN:
+        return jsonify({"ok":False,"error":"unauthorized"}), 401
     with LOCK:
         res = process_positions(send_alert=True)
         auto = maybe_auto_report()
+    return jsonify({"ok":True,"result":res,"auto_report":auto,"time":to_kst()})
 
-    return jsonify({"ok": True, "result": res, "auto_report": auto, "time": to_kst()})
-
-@app.route("/daily_report", methods=["GET", "POST"])
+@app.route("/daily_report", methods=["GET","POST"])
 def daily_report():
-    if DAILY_REPORT_TOKEN and request.args.get("token", "") != DAILY_REPORT_TOKEN:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
-
-    d = request.args.get("date", "").strip()
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", d or ""):
-        d = None
-
+    if DAILY_REPORT_TOKEN and request.args.get("token","") != DAILY_REPORT_TOKEN:
+        return jsonify({"ok":False,"error":"unauthorized"}), 401
+    d = request.args.get("date","").strip()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", d or ""): d = None
     sent = 0
     for cid in CHAT_IDS_POSITION:
-        send_report_summary(cid, d)
-        sent += 1
-
-    return jsonify({"ok": True, "sent": sent, "date": d or now_kst().strftime("%Y-%m-%d")})
+        send_report_summary(cid, d); sent += 1
+    return jsonify({"ok":True,"sent":sent,"date":d or now_kst().strftime("%Y-%m-%d")})
 
 @app.route("/health_check", methods=["GET"])
 def health():
-    with LOCK:
-        auto = maybe_auto_report()
-    return jsonify({"ok": True, "auto_report": auto, "time": to_kst()})
+    with LOCK: auto = maybe_auto_report()
+    return jsonify({"ok":True,"auto_report":auto,"time":to_kst()})
 
-# 수동 테스트(옵션): 텔레그램 발송 경로 확인용
-@app.route("/signal_test", methods=["GET"])
+# [FIX] 텔레그램 전송 라인 단독 점검용
+@app.route("/signal_test", methods=["GET","POST"])
 def signal_test():
-    token = request.args.get("token", "")
-    if POSITIONS_CHECK_TOKEN and token != POSITIONS_CHECK_TOKEN:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
-
-    msg = tpl_panterra("buy", "BYBIT·BTCUSDT.P", "TEST", "1m", now_kst())
-    result = send_signal_alert(msg)
-    return jsonify({"ok": True, "test_sent": result["sent"], "targets": result["total"], "time": to_kst()})
+    if TG_CONTROL_SECRET and request.args.get("secret","") != TG_CONTROL_SECRET:
+        return jsonify({"ok":False,"error":"unauthorized"}), 401
+    text = request.args.get("text","🔔 TV 시그널 테스트\n🕒 " + to_kst())
+    deliver = send_signal_alert(text)
+    return jsonify({"ok":True,"deliver":deliver,"time":to_kst()})
 
 # ===== Bootstrap =====
 def bootstrap():
     cfg_init()
     om = open_state()
-    if om and not init_done():
-        mark_init_done()
-
+    if om and not init_done(): mark_init_done()
     for cid in CHAT_IDS:
-        if is_group(cid) and R.get(sw_key("signal", cid)) is None:
-            sw_set("signal", cid, False)
-
+        if is_group(cid) and R.get(sw_key("signal",cid)) is None: sw_set("signal", cid, False)
     for cid in CHAT_IDS_POSITION:
-        if is_group(cid) and R.get(sw_key("position", cid)) is None:
-            sw_set("position", cid, False)
-
+        if is_group(cid) and R.get(sw_key("position",cid)) is None: sw_set("position", cid, False)
     logging.info("boot ok | CHAT_IDS=%s | CHAT_IDS_POSITION=%s", CHAT_IDS, CHAT_IDS_POSITION)
 
 bootstrap()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT","10000")))
