@@ -649,32 +649,43 @@ def switch_logs(n=10) -> str:
 
 def snapshot_text() -> str:
     ps = fetch_positions()
-    
-    # 포지션 없을 때도 같은 헤더 톤 유지
+
     if not ps:
         return (
-            "📌 현재 포지션 스냅샷\n"
-            "━━━━━━━━━━━━━━\n\n"
+            "📌 *현재 포지션 스냅샷*\n"
+            "━━━━━━━━━━━━━━\n"
             "오픈 포지션 없음\n\n"
             f"🕒 {to_kst()}"
         )
 
     lines = [
-        "📌 현재 포지션 스냅샷",
-        "━━━━━━━━━━━━━━",
-        ""
+        "📌 *현재 포지션 스냅샷*",
+        "━━━━━━━━━━━━━━"
     ]
 
-    for p in ps:
+    for i, p in enumerate(ps):
+        head = "📈 *포지션 스냅샷*" if p["side"] == "Long" else "📉 *포지션 스냅샷*"
+
         lines += [
-            f"{p['symbol']} | {p['side']}",
-            f"Entry {fmt_price(p['entry_price'])} | Pos {fmt_qty(p['qty'])} {p['base']}",
-            f"uPnL {_fmt_signed(p['u_pnl'], plus_for_positive=True)} ({_fmt_pct(p['u_pnl_pct'])}) | rPnL {_fmt_signed(p['r_pnl'], plus_for_positive=False)}",
-            ""
+            head,
+            f"BingX · {p['symbol']}",
+            f"{p['side']} · {p['margin_mode']} · {int(round(p['leverage']))}x",
+            "",
+            f"*Entry*    : *{fmt_price(p['entry_price'])} USDT*",
+            f"*Position* : *{fmt_qty(p['qty'])} {p['base']}*",
+            f"Value      : {fmt_num(p['value'], 2)} USDT",
+            f"Margin     : {fmt_num(p['margin'], 2)} USDT",
+            "",
+            f"uPnL : {sign(p['u_pnl'])} USDT ({pct(p['u_pnl_pct'])})",
+            f"rPnL : {sign(p['r_pnl'])} USDT",
         ]
 
-    lines.append(f"🕒 {to_kst()}")
+        if i < len(ps) - 1:
+            lines += ["", "━━━━━━━━━━━━━━"]
+
+    lines += ["", f"🕒 {to_kst()}"]
     return "\n".join(lines)
+
 
 def state_reset() -> str:
     R.delete("state:open_positions"); R.delete("state:init_done")
