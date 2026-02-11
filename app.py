@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import os, re, json, time, hmac, hashlib, logging, threading
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlencode
+from urllib.parse import urlencode, parse_qs
 from typing import Any, Dict, List, Optional, Tuple
 import requests
 from flask import Flask, request, jsonify
@@ -129,18 +129,46 @@ def rpush_json(k: str, v: Dict[str, Any], keep=2000):
 
 # ===== Telegram =====
 def tg_send(token: str, chat_id: str, text: str, preview=True) -> bool:
-    if not token or not chat_id: return False
+    if not token or not chat_id:
+        return False
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    base_payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": preview
+    }
+
     try:
-        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
-            "chat_id": chat_id, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": preview
-        }, timeout=TIMEOUT)
-        if r.status_code >= 400:
-            logging.warning("TG send fail %s %s", r.status_code, r.text[:300]); return False
-        j = r.json()
-        if not j.get("ok"): logging.warning("TG send fail %s", j); return False
+        # 1차: Markdown
+        r = requests.post(url, json={**base_payload, "parse_mode": "Markdown"}, timeout=TIMEOUT)
+        ok = False
+        try:
+            j = r.json()
+            ok = (r.status_code < 400 and bool(j.get("ok")))
+        except Exception:
+            ok = False
+
+        if ok:
+            return True
+
+        logging.warning("TG send fail(markdown) %s %s", r.status_code, (r.text or "")[:300])
+
+        # 2차: plain text fallback
+        r2 = requests.post(url, json=base_payload, timeout=TIMEOUT)
+        try:
+            j2 = r2.json()
+        except Exception:
+            j2 = {}
+
+        if r2.status_code >= 400 or not j2.get("ok"):
+            logging.warning("TG send fail(plain) %s %s", r2.status_code, (r2.text or "")[:300])
+            return False
         return True
+
     except Exception as e:
-        logging.warning("TG send err %s", e); return False
+        logging.warning("TG send err %s", e)
+        return False
 
 def tg_send_chunk(token: str, chat_id: str, text: str, n=3500):
     if len(text) <= n: tg_send(token, chat_id, text); return
@@ -370,15 +398,160 @@ HELP_TEXT = (
 )
 
 # ===== Signal Parse =====
+def parse_loose_kv_text(text: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    if not isinstance(text, str):
+        return out
+    s = text.strip()
+    if not s:
+        return out
+
+    # line 기반 key:value / key=value
+    for line in re.split(r"[\r\n]+", s):
+        line = line.strip()
+        if not line:
+            continue
+        # 쉼표로도 쪼개보기
+        for part in re.split(r"\s*,\s*", line):
+            part = part.strip()
+            m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(.+)$", part)
+            if m:
+                k, v = m.group(1), m.group(2).strip().strip('"').strip("'")
+                out[k] = v
+
+    # 공백 구분 key=value
+    for m in re.finditer(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^\s]+)", s):
+        k, v = m.group(1), m.group(2).strip().strip('"').strip("'")
+        out.setdefault(k, v)
+
+    return out
+
+def dict_maybe(v: Any) -> Dict[str, Any]:
+    if isinstance(v, dict):
+        return dict(v)
+
+    if isinstance(v, list):
+        for it in v:
+            if isinstance(it, dict):
+                return dict(it)
+        return {}
+
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return {}
+
+        # 1) JSON 문자열
+        try:
+            j = json.loads(s)
+            d = dict_maybe(j)
+            if d:
+                return d
+        except Exception:
+            pass
+
+        # 2) querystring(payload=... or message=...)
+        try:
+            qs = parse_qs(s, keep_blank_values=True)
+            if qs:
+                d = {k: (vals[0] if isinstance(vals, list) and vals else vals) for k, vals in qs.items()}
+                for nk in ("payload", "message", "data", "alert"):
+                    if nk in d:
+                        nd = dict_maybe(d.get(nk))
+                        if nd:
+                            d.update(nd)
+                if d:
+                    return d
+        except Exception:
+            pass
+
+        # 3) loose key/value text
+        kv = parse_loose_kv_text(s)
+        if kv:
+            return kv
+
+    return {}
+
+def expand_nested_payload(d: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(d or {})
+
+    for nk in ("payload", "message", "data", "alert", "content", "body", "text"):
+        if nk in out:
+            nd = dict_maybe(out.get(nk))
+            if nd:
+                out.update(nd)
+
+    # 소문자 키 보강
+    for k, v in list(out.items()):
+        lk = str(k).lower()
+        if lk not in out:
+            out[lk] = v
+
+    return out
+
+def extract_tv_payload(req) -> Dict[str, Any]:
+    cands: List[Dict[str, Any]] = []
+
+    # JSON body
+    try:
+        j = req.get_json(silent=True)
+        d = dict_maybe(j)
+        if d:
+            cands.append(expand_nested_payload(d))
+    except Exception:
+        pass
+
+    # form-data / x-www-form-urlencoded
+    try:
+        if req.form:
+            d = dict(req.form.to_dict(flat=True))
+            d = expand_nested_payload(d)
+            if d:
+                cands.append(d)
+    except Exception:
+        pass
+
+    # raw body text
+    try:
+        raw = (req.get_data(as_text=True) or "").strip()
+        d = dict_maybe(raw)
+        if d:
+            cands.append(expand_nested_payload(d))
+    except Exception:
+        pass
+
+    if not cands:
+        return {}
+
+    def score(x: Dict[str, Any]) -> int:
+        keys = {str(k).lower() for k in x.keys()}
+        core = sum(1 for k in [
+            "symbol", "ticker", "pair", "market",
+            "side", "action", "signal",
+            "strategy", "strategy_name", "indicator",
+            "price", "close"
+        ] if k in keys)
+        return core * 10 + len(keys)
+
+    cands.sort(key=score, reverse=True)
+    return cands[0]
+
 def infer_signal(payload: Dict[str,Any]) -> Dict[str,Any]:
-    symbol = payload.get("symbol") or payload.get("ticker") or payload.get("pair") or payload.get("market") or "BYBIT·BTCUSDT.P"
-    tf = str(payload.get("interval") or payload.get("timeframe") or payload.get("tf") or "1m")
-    price = payload.get("price") or payload.get("close") or payload.get("last") or payload.get("entry") or "-"
-    action = str(payload.get("action") or payload.get("side") or payload.get("signal") or "").lower()
+    p = dict(payload or {})
+    for k, v in list(p.items()):
+        lk = str(k).lower()
+        if lk not in p:
+            p[lk] = v
+
+    symbol = p.get("symbol") or p.get("ticker") or p.get("pair") or p.get("market") or p.get("exchange_ticker") or "BYBIT·BTCUSDT.P"
+    tf = str(p.get("interval") or p.get("timeframe") or p.get("tf") or "1m")
+    price = p.get("price") or p.get("close") or p.get("last") or p.get("entry") or "-"
+    action = str(p.get("action") or p.get("side") or p.get("signal") or "").lower()
+
     blob = " | ".join([
-        str(payload.get("strategy","")), str(payload.get("strategy_name","")), str(payload.get("indicator","")),
-        str(payload.get("title","")), str(payload.get("name","")), str(payload.get("message","")),
-        str(payload.get("comment","")), str(payload.get("text","")), str(payload)
+        str(p.get("strategy","")), str(p.get("strategy_name","")), str(p.get("indicator","")),
+        str(p.get("title","")), str(p.get("name","")), str(p.get("message","")),
+        str(p.get("comment","")), str(p.get("text","")), str(p)
     ]).lower()
 
     kind = "unknown"
@@ -392,11 +565,16 @@ def infer_signal(payload: Dict[str,Any]) -> Dict[str,Any]:
     if any(x in action for x in ["sell","short"]): side = "sell"
     if any(x in action for x in ["buy","long"]): side = "buy"
 
-    lo = payload.get("low") or payload.get("support_low") or payload.get("zone_low") or payload.get("from") or payload.get("min")
-    hi = payload.get("high") or payload.get("support_high") or payload.get("zone_high") or payload.get("to") or payload.get("max")
-    if lo is None: lo = payload.get("zone1") or payload.get("price1") or "-"
-    if hi is None: hi = payload.get("zone2") or payload.get("price2") or "-"
-    fire = "🔥🔥" if str(payload.get("fire") or payload.get("strength") or payload.get("level") or "").strip() in ("2","high","strong","🔥🔥") else "🔥"
+    lo = p.get("low") or p.get("support_low") or p.get("zone_low") or p.get("from") or p.get("min")
+    hi = p.get("high") or p.get("support_high") or p.get("zone_high") or p.get("to") or p.get("max")
+    if lo is None: lo = p.get("zone1") or p.get("price1") or "-"
+    if hi is None: hi = p.get("zone2") or p.get("price2") or "-"
+    fire = "🔥🔥" if str(p.get("fire") or p.get("strength") or p.get("level") or "").strip() in ("2","high","strong","🔥🔥") else "🔥"
+
+    # fallback: 단순 BUY/SELL payload라도 panterra로 처리
+    if kind == "unknown":
+        if any(x in action for x in ["buy", "sell", "long", "short"]) and symbol:
+            kind = "panterra"
 
     if isinstance(symbol, str) and "·" not in symbol and (symbol.endswith(".P") or "USDT" in symbol.upper()):
         symbol = f"BYBIT·{symbol}"
@@ -454,10 +632,14 @@ def fee_calc(symbol: str, st: datetime, en: datetime, closed: float, entry_v: fl
     ff = -(abs(entry_v)+abs(exit_v))*TAKER_FEE_RATE
     return ff, closed + ff
 
-def send_signal_alert(text: str):
+def send_signal_alert(text: str) -> Dict[str, int]:
+    attempted, sent = 0, 0
     for cid in CHAT_IDS:
         if (not is_group(cid)) or sw_get("signal", cid)=="1":
-            tg_send(BOT_TOKEN, cid, text)
+            attempted += 1
+            if tg_send(BOT_TOKEN, cid, text):
+                sent += 1
+    return {"attempted": attempted, "sent": sent, "failed": attempted - sent}
 
 def send_pos_alert(text: str):
     for cid in CHAT_IDS_POSITION:
@@ -686,7 +868,6 @@ def snapshot_text() -> str:
     lines += ["", f"🕒 {to_kst()}"]
     return "\n".join(lines)
 
-
 def state_reset() -> str:
     R.delete("state:open_positions"); R.delete("state:init_done")
     return f"⚠️ state:open_positions / state:init_done 초기화 완료\n🕒 {to_kst()}"
@@ -753,13 +934,33 @@ def root():
 def tv_webhook():
     if TV_WEBHOOK_SECRET and request.args.get("secret","") != TV_WEBHOOK_SECRET:
         return jsonify({"ok":False,"error":"unauthorized"}), 401
-    payload = request.get_json(silent=True) or {}
-    if not isinstance(payload, dict): payload = {}
+
+    payload = extract_tv_payload(request)
     msg = build_signal_msg(payload)
+
     if msg:
-        send_signal_alert(msg)
-        return jsonify({"ok":True,"sent":True})
-    return jsonify({"ok":True,"sent":False,"reason":"ignored_or_throttled"})
+        stat = send_signal_alert(msg)
+        sig = infer_signal(payload)
+        logging.info("tv-webhook sent=%s deliver=%s kind=%s side=%s", stat["sent"] > 0, stat, sig.get("kind"), sig.get("side"))
+        return jsonify({
+            "ok": True,
+            "sent": stat["sent"] > 0,
+            "deliver": stat,
+            "kind": sig.get("kind"),
+            "side": sig.get("side")
+        })
+
+    sig = infer_signal(payload)
+    logging.info("tv-webhook ignored reason=ignored_or_throttled kind=%s side=%s keys=%s",
+                 sig.get("kind"), sig.get("side"), list(payload.keys())[:20])
+    return jsonify({
+        "ok": True,
+        "sent": False,
+        "reason": "ignored_or_throttled",
+        "kind": sig.get("kind"),
+        "side": sig.get("side"),
+        "payload_keys": list(payload.keys())[:20]
+    })
 
 @app.route("/tg/position", methods=["POST"])
 def tg_position():
@@ -777,6 +978,17 @@ def tg_position():
 def tg_signal():
     if TG_CONTROL_SECRET and request.args.get("secret","") != TG_CONTROL_SECRET:
         return jsonify({"ok":False,"error":"unauthorized"}), 401
+
+    upd = request.get_json(silent=True) or {}
+    if not isinstance(upd, dict):
+        return jsonify({"ok":True,"ignored":True})
+
+    chat_id, uid, text = parse_update(upd)
+    if chat_id and text.startswith("/"):
+        resp = handle_command(chat_id, uid, text)
+        if resp:
+            tg_send(BOT_TOKEN, chat_id, resp)
+
     return jsonify({"ok":True})
 
 @app.route("/positions_check", methods=["GET","POST"])
@@ -804,6 +1016,11 @@ def health():
     with LOCK: auto = maybe_auto_report()
     return jsonify({"ok":True,"auto_report":auto,"time":to_kst()})
 
+# /health 별칭
+@app.route("/health", methods=["GET"])
+def health_alias():
+    return health()
+
 # ===== Bootstrap =====
 def bootstrap():
     cfg_init()
@@ -819,4 +1036,3 @@ bootstrap()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT","10000")))
-
