@@ -955,18 +955,59 @@ def hist_list(d: str) -> List[Dict[str, Any]]:
             out.append(j)
     return out
 
-def fee_calc(symbol: str, st: datetime, en: datetime, closed: float, entry_v: float, exit_v: float) -> Tuple[float, float]:
+
+# ====== ✅ 수정(1): income 기반 분해/정산 함수 추가 + fee_calc 교체 (그 외 로직/포맷 영향 없음) ======
+def _income_split(symbol: str, st: datetime, en: datetime) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    ✅ 거래소 정산(income) 기반으로
+    - closed_pnl(정산 손익)
+    - fee_funding(수수료+펀딩)
+    - realized(최종 실현손익)
+    를 최대한 안정적으로 분해해서 리턴
+
+    실패(None)면 호출부에서 기존 추정치 로직으로 fallback
+    """
     recs = fetch_income(symbol, int(st.astimezone(UTC).timestamp() * 1000), int(en.astimezone(UTC).timestamp() * 1000))
-    if recs:
-        ff = 0.0
-        for r in recs:
-            typ = str(r.get("incomeType") or r.get("type") or r.get("bizType") or "").lower()
-            inc = asf(r.get("income") or r.get("profit") or r.get("amount") or 0)
-            if any(x in typ for x in ["commission", "fee", "funding", "fund"]):
-                ff += inc
-        return ff, closed + ff
+    if not recs:
+        return None, None, None
+
+    closed_sum = 0.0
+    fee_funding_sum = 0.0
+    realized_sum = 0.0
+
+    for r in recs:
+        typ = str(r.get("incomeType") or r.get("type") or r.get("bizType") or r.get("income_type") or "").lower()
+        inc = asf(r.get("income") or r.get("profit") or r.get("amount") or r.get("realizedPnl") or 0)
+
+        # income 원본 합 = 최종 실현(거래소 정산에 가장 가까운 기준)
+        realized_sum += inc
+
+        # 수수료/펀딩은 타입 키워드로 최대한 분리
+        if any(x in typ for x in ["commission", "fee", "funding", "fund"]):
+            fee_funding_sum += inc
+            continue
+
+        # 나머지는 손익으로 귀속(거래소 타입명이 달라도 보통 손익성 항목)
+        closed_sum += inc
+
+    return closed_sum, fee_funding_sum, realized_sum
+
+
+def fee_calc(symbol: str, st: datetime, en: datetime, closed: float, entry_v: float, exit_v: float) -> Tuple[float, float]:
+    """
+    ✅ 기존 인터페이스 유지(다른 코드 영향 X)
+    - return: (fee_funding, realized)
+    """
+    c, ff, real = _income_split(symbol, st, en)
+    if c is not None:
+        # income 기반 확정
+        return ff, real
+
+    # income 못 가져오면 기존 추정 fallback
     ff = -(abs(entry_v) + abs(exit_v)) * TAKER_FEE_RATE
     return ff, closed + ff
+# ====== ✅ 수정(1) 끝 ======
+
 
 def send_signal_alert(text: str):
     sent = 0
@@ -997,6 +1038,7 @@ def send_pos_alert(text: str):
 
 # -----------------------
 # 이하 (포지션/리포트/명령/라우트/부트스트랩) 원본 그대로
+# 단, ✅ 수정(2): OPEN/ADD/REDUCE rPnL 표시만 income으로 보강
 # -----------------------
 
 def process_positions(send_alert=True) -> Dict[str, Any]:
@@ -1004,6 +1046,16 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
     for p in fetch_positions():
         cur[pkey(p["symbol"], p["side"])] = p
     prev = open_state()
+
+    # ====== ✅ 수정(2): rPnL 표시를 세션 시작 이후 income 합계로 보강 (표시만, 로직/포맷 불변) ======
+    def _rpnL_since(symbol: str, start_iso: str) -> Optional[float]:
+        st = iso_parse(start_iso) or now_kst()
+        en = now_kst()
+        c, ff, real = _income_split(symbol, st, en)
+        if real is None:
+            return None
+        return real
+    # ====== ✅ 수정(2) 끝 ======
 
     if not init_done():
         for k, p in cur.items():
@@ -1037,6 +1089,7 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
         o = prev.get(k)
         if not o:
             events["open"] += 1
+            start_iso = now_kst().isoformat()
             sess_set(
                 k,
                 {
@@ -1045,7 +1098,7 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
                     "base": p["base"],
                     "margin_mode": p["margin_mode"],
                     "leverage": p["leverage"],
-                    "start_ts": now_kst().isoformat(),
+                    "start_ts": start_iso,
                     "entry_price_init": p["entry_price"],
                     "last_entry_price": p["entry_price"],
                     "total_entry_value": p["value"],
@@ -1056,7 +1109,12 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
                 },
             )
             if send_alert:
-                send_pos_alert(tpl_open(p))
+                # ✅ rPnL 표시 보강(알림 표시만)
+                p_show = dict(p)
+                rp = _rpnL_since(p.get("symbol", ""), start_iso)
+                if rp is not None:
+                    p_show["r_pnl"] = rp
+                send_pos_alert(tpl_open(p_show))
         else:
             q0, q1 = asf(o.get("qty")), asf(p.get("qty"))
             s = sess_get(k) or {
@@ -1076,7 +1134,12 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
                 dv = max(asf(p.get("value")) - asf(o.get("value")), (q1 - q0) * asf(p.get("entry_price")))
                 s["total_entry_value"] = asf(s.get("total_entry_value")) + max(dv, 0.0)
                 if send_alert:
-                    send_pos_alert(tpl_add(o, p))
+                    # ✅ rPnL 표시 보강(알림 표시만)
+                    p_show = dict(p)
+                    rp = _rpnL_since(p.get("symbol", ""), str(s.get("start_ts", "")))
+                    if rp is not None:
+                        p_show["r_pnl"] = rp
+                    send_pos_alert(tpl_add(o, p_show))
 
             elif q1 + 1e-12 < q0:
                 events["reduce"] += 1
@@ -1084,7 +1147,12 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
                 rv = max(asf(o.get("value")) - asf(p.get("value")), rq * asf(p.get("mark_price")))
                 s["total_exit_value"] = asf(s.get("total_exit_value")) + max(rv, 0.0)
                 if send_alert:
-                    send_pos_alert(tpl_reduce(o, p))
+                    # ✅ rPnL 표시 보강(알림 표시만)
+                    p_show = dict(p)
+                    rp = _rpnL_since(p.get("symbol", ""), str(s.get("start_ts", "")))
+                    if rp is not None:
+                        p_show["r_pnl"] = rp
+                    send_pos_alert(tpl_reduce(o, p_show))
 
             s.update(
                 {
