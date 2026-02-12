@@ -544,7 +544,7 @@ def tpl_close(sess: Dict[str, Any], close_price: float, closed: float, fee: floa
     )
 
 def tpl_barcode(side, symbol, price, tf, ts):
-    title = "🟢🐋 *바코드 · 매수(Long)*" if side == "buy" else "🔴🐋 *바코드 · 매도(Short)*"
+    title = "🟢🐳 *바코드 · 매수(Long)*" if side == "buy" else "🔴🐳 *바코드 · 매도(Short)*"
     return f"{title}\n{symbol} | {price} | {tf}\n_\"바코드 신호는 보조근거로 활용하시길 권장드립니다.\"_\n🕒 {to_kst(ts)}"
 
 # ✅ CHANGE: zone(구간 번호) 반영. zone 없으면 "" → "구간  지지/저항" 형태로 공백 유지
@@ -554,7 +554,7 @@ def tpl_prism(side, symbol, lo, hi, zone, ts):
     return f"{title}\n{symbol} | {lo} ~ {hi}\n_\"분할 진입을 권장드립니다.\"_ \n🕒 {to_kst(ts)}"
 
 def tpl_rsi(side, symbol, price, tf, fire, ts):
-    title = f"🟢 *RSI · 매수(Long) · {fire}*" if side == "buy" else f"🔴 *RSI · 매도(Short) · {fire}*"
+    title = f"🟢🤖 *RSI · 매수(Long) · {fire}*" if side == "buy" else f"🔴🤖 *RSI · 매도(Short) · {fire}*"
     return f"{title}\n{symbol} | {price} | {tf}\n_\"RSI 신호는 보조근거로 활용하시길 권장드립니다.\"_ \n🕒 {to_kst(ts)}"
 
 # ⚠️ 요청사항 유지: 판테라 문구/노랑별/노랑 표기 절대 유지
@@ -562,7 +562,7 @@ def tpl_panterra(side, symbol, price, tf, ts):
     strategy = "PanTerra"
     if side == "buy":
         return (
-            f"*🟢🐋[ 매수(Long) 알림 ] ({strategy})🐋*\n"
+            f"*🟢🐳[ 매수(Long) 알림 ] ({strategy})🐳*\n"
             f"{symbol} | {price} | {tf}\n"
             f"*지표* : {strategy}\n"
             f"*시그널* : 파랑별(매수)\n"
@@ -571,7 +571,7 @@ def tpl_panterra(side, symbol, price, tf, ts):
             f"🕒 {to_kst(ts)}"
         )
     return (
-        f"*🔴🐋[ 매도(Short) 알림 ] ({strategy})🐋*\n"
+        f"*🔴🐳[ 매도(Short) 알림 ] ({strategy})🐳*\n"
         f"{symbol} | {price} | {tf}\n"
         f"*지표* : {strategy}\n"
         f"*시그널* : 노랑별(매도)\n"
@@ -764,6 +764,14 @@ def _extract_prism_zone(payload: Dict[str, Any], raw_text: str) -> str:
 
     return ""
 
+# ✅ (추가) Prism 레인지 텍스트 파싱: "65777.8 ~ 65811.9"
+def _extract_range_from_text(raw_text: str) -> Tuple[str, str]:
+    t = (raw_text or "").replace(",", "")
+    m = re.search(r'(?<!\d)(\d+(?:\.\d+)?)[ ]*~[ ]*(\d+(?:\.\d+)?)(?!\d)', t)
+    if not m:
+        return "-", "-"
+    return m.group(1), m.group(2)
+
 def infer_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
     raw_text = str(payload.get("text", "") or payload.get("message", "") or payload.get("comment", "") or "")
 
@@ -843,12 +851,23 @@ def infer_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
     if price == "-":
         price = _extract_price_from_text(raw_text, tf)
 
+    # ===== 여기만 Prism 레인지 보강 수정(그 외 로직 변경 없음) =====
     lo = payload.get("low") or payload.get("support_low") or payload.get("zone_low") or payload.get("from") or payload.get("min")
     hi = payload.get("high") or payload.get("support_high") or payload.get("zone_high") or payload.get("to") or payload.get("max")
+
+    if kind == "prism":
+        # Prism은 메시지 텍스트에 "65777.8 ~ 65811.9"가 들어오는 케이스가 많아서 우선 보강
+        tlo, thi = _extract_range_from_text(raw_text)
+        if (lo is None or str(lo).strip() in ("", "-", "None", "none")) and tlo != "-":
+            lo = tlo
+        if (hi is None or str(hi).strip() in ("", "-", "None", "none")) and thi != "-":
+            hi = thi
+
     if lo is None:
         lo = payload.get("zone1") or payload.get("price1") or "-"
     if hi is None:
         hi = payload.get("zone2") or payload.get("price2") or "-"
+
     fire = "🔥🔥" if str(payload.get("fire") or payload.get("strength") or payload.get("level") or "").strip() in ("2", "high", "strong", "🔥🔥") else "🔥"
 
     if "·" not in ss and (ss.endswith(".P") or "USDT" in ss.upper()):
@@ -975,6 +994,10 @@ def send_pos_alert(text: str):
             if tg_send(BOT_TOKEN_POSITION, cid, text):
                 sent += 1
     logging.info("position alert sent=%s/%s", sent, len(CHAT_IDS_POSITION))
+
+# -----------------------
+# 이하 (포지션/리포트/명령/라우트/부트스트랩) 원본 그대로
+# -----------------------
 
 def process_positions(send_alert=True) -> Dict[str, Any]:
     cur: Dict[str, Dict[str, Any]] = {}
@@ -1143,7 +1166,6 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
 
     save_open_state(cur)
     return {"ok": True, "positions_now": len(cur), "events": events, "closed_trades": closed_rows}
-
 
 # ===== Report =====
 def rows_until(date_str: str, end_dt: datetime) -> List[Dict[str, Any]]:
