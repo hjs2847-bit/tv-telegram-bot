@@ -735,7 +735,7 @@ def infer_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
     kind = "unknown"
     if ("barcode" in blob) or ("바코드" in blob):
         kind = "barcode"
-    elif ("prism" in blob) or ("프리즘" in blob):
+    elif ("prism" in blob) or ("프리즘" in blob) or ("지지 준비" in blob) or ("저항 준비" in blob) or ("구간\s*[1-9]" in blob):
         kind = "prism"
     elif ("rsi" in blob) or re.search(r"\brsi\b", blob):
         kind = "rsi"
