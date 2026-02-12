@@ -245,6 +245,32 @@ def tg_send(token: str, chat_id: str, text: str, preview=True) -> bool:
         logging.warning("TG send err plain %s", e)
         return False
 
+def tg_send_plain(token: str, chat_id: str, text: str, preview=True) -> bool:
+    """
+    ✅ CHANGE: kind 미정(unknown) 시 '포맷 없이 원문 그대로' 보내기용 (parse_mode 미사용)
+    다른 메시지에는 영향 없음.
+    """
+    if not token or not chat_id:
+        return False
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        r = requests.post(
+            url,
+            json={"chat_id": chat_id, "text": text, "disable_web_page_preview": preview},
+            timeout=TIMEOUT,
+        )
+        if r.status_code >= 400:
+            logging.warning("TG send plain-only fail %s %s", r.status_code, r.text[:300])
+            return False
+        j = r.json()
+        if not j.get("ok"):
+            logging.warning("TG send plain-only fail json=%s", j)
+            return False
+        return True
+    except Exception as e:
+        logging.warning("TG send plain-only err %s", e)
+        return False
+
 def tg_send_chunk(token: str, chat_id: str, text: str, n=3500):
     if len(text) <= n:
         tg_send(token, chat_id, text)
@@ -521,8 +547,10 @@ def tpl_barcode(side, symbol, price, tf, ts):
     title = "🟢🐋 *바코드 · 매수(Long)*" if side == "buy" else "🔴🐋 *바코드 · 매도(Short)*"
     return f"{title}\n{symbol} | {price} | {tf}\n_\"바코드 신호는 보조근거로 활용하시길 권장드립니다.\"_\n🕒 {to_kst(ts)}"
 
-def tpl_prism(side, symbol, lo, hi, ts):
-    title = "🟢 *구간 4 지지 준비 (Prism)* 🟢 " if side == "buy" else "🔴 *구간 4 저항 준비 (Prism)* 🔴 "
+# ✅ CHANGE: zone(구간 번호) 반영. zone 없으면 "" → "구간  지지/저항" 형태로 공백 유지
+def tpl_prism(side, symbol, lo, hi, zone, ts):
+    zone = "" if zone is None else str(zone)
+    title = f"🟢 *구간 {zone} 지지 준비 (Prism)* 🟢 " if side == "buy" else f"🔴 *구간 {zone} 저항 준비 (Prism)* 🔴 "
     return f"{title}\n{symbol} | {lo} ~ {hi}\n_\"분할 진입을 권장드립니다.\"_ \n🕒 {to_kst(ts)}"
 
 def tpl_rsi(side, symbol, price, tf, fire, ts):
@@ -711,6 +739,31 @@ def _extract_price_from_text(raw_text: str, tf: str) -> str:
 
     return "-"
 
+def _extract_prism_zone(payload: Dict[str, Any], raw_text: str) -> str:
+    """
+    ✅ CHANGE: Prism '구간 N' 숫자 추출
+    - 없으면 "" (요청: 기본값 4 금지, 공백 유지)
+    """
+    # 1) payload 기반 후보
+    for k in ["zone", "zone_no", "zone_num", "level", "lvl", "step", "segment", "stage", "section", "area"]:
+        if k in payload:
+            v = str(payload.get(k) or "").strip()
+            if v.isdigit():
+                return v
+
+    # 2) text 기반: "구간6", "구간 6"
+    t = (raw_text or "")
+    m = re.search(r"구간\s*(\d+)", t)
+    if m:
+        return m.group(1)
+
+    # 3) 영문도 혹시
+    m2 = re.search(r"\bzone\s*(\d+)\b", t, flags=re.IGNORECASE)
+    if m2:
+        return m2.group(1)
+
+    return ""
+
 def infer_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
     raw_text = str(payload.get("text", "") or payload.get("message", "") or payload.get("comment", "") or "")
 
@@ -735,7 +788,8 @@ def infer_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
     kind = "unknown"
     if ("barcode" in blob) or ("바코드" in blob):
         kind = "barcode"
-    elif ("prism" in blob) or ("프리즘" in blob) or ("지지 준비" in blob) or ("저항 준비" in blob) or ("구간\s*[1-9]" in blob):
+    # ✅ CHANGE: "구간\s*[1-9]" 문자열 포함이 아니라 정규식으로 안정 판별
+    elif ("prism" in blob) or ("프리즘" in blob) or ("지지 준비" in blob) or ("저항 준비" in blob) or re.search(r"구간\s*\d+", blob):
         kind = "prism"
     elif ("rsi" in blob) or re.search(r"\brsi\b", blob):
         kind = "rsi"
@@ -800,7 +854,9 @@ def infer_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
     if "·" not in ss and (ss.endswith(".P") or "USDT" in ss.upper()):
         ss = f"BYBIT·{ss}"
 
-    return {"kind": kind, "side": side, "symbol": str(ss), "tf": tf, "price": price, "low": lo, "high": hi, "fire": fire}
+    zone = _extract_prism_zone(payload, raw_text) if kind == "prism" else ""
+
+    return {"kind": kind, "side": side, "symbol": str(ss), "tf": tf, "price": price, "low": lo, "high": hi, "fire": fire, "zone": zone}
 
 def panterra_throttle(symbol: str, side: str, sec=1800) -> bool:
     k = f"throttle:panterra:{symbol}:{side}"
@@ -830,7 +886,7 @@ def build_signal_msg(payload: Dict[str, Any]) -> Optional[str]:
     if f["kind"] == "barcode":
         return tpl_barcode(f["side"], f["symbol"], f["price"], f["tf"], ts)
     if f["kind"] == "prism":
-        return tpl_prism(f["side"], f["symbol"], f["low"], f["high"], ts)
+        return tpl_prism(f["side"], f["symbol"], f["low"], f["high"], f.get("zone", ""), ts)
     if f["kind"] == "rsi":
         return tpl_rsi(f["side"], f["symbol"], f["price"], f["tf"], f["fire"], ts)
     if f["kind"] == "panterra":
@@ -900,6 +956,17 @@ def send_signal_alert(text: str):
             if tg_send(BOT_TOKEN, cid, text):
                 sent += 1
     logging.info("signal alert sent=%s/%s", sent, len(CHAT_IDS))
+
+def send_signal_alert_plain(text: str):
+    """
+    ✅ CHANGE: kind 미정(unknown) 원문 그대로 발송(포맷/마크다운 없음)
+    """
+    sent = 0
+    for cid in CHAT_IDS:
+        if (not is_group(cid)) or sw_get("signal", cid) == "1":
+            if tg_send_plain(BOT_TOKEN, cid, text):
+                sent += 1
+    logging.info("signal alert plain sent=%s/%s", sent, len(CHAT_IDS))
 
 def send_pos_alert(text: str):
     sent = 0
@@ -1399,6 +1466,17 @@ def tv_webhook():
 
     inf = infer_signal(payload)
     msg = build_signal_msg(payload)
+
+    # ✅ CHANGE: kind 미정이면 포맷 없이 '원문 그대로' 발송
+    if not msg and inf.get("kind") == "unknown":
+        raw_text = str(payload.get("text") or payload.get("message") or payload.get("comment") or "").strip()
+        if not raw_text:
+            raw_text = json.dumps(payload, ensure_ascii=False)
+        logging.info("tv-webhook unknown passthrough sent=%s", bool(raw_text))
+        if raw_text:
+            send_signal_alert_plain(raw_text)
+            return jsonify({"ok": True, "sent": True, "infer": inf, "mode": "unknown_passthrough"})
+
     logging.info("tv-webhook payload=%s infer=%s sent=%s", payload, inf, bool(msg))
 
     if msg:
