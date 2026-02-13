@@ -55,15 +55,6 @@ REPORT_AUTO_CHAT_DEFAULT = E("REPORT_AUTO_CHAT")
 TAKER_FEE_RATE = float(E("TAKER_FEE_RATE", "0.0005"))
 TIMEOUT = Ei("REQUEST_TIMEOUT", 15)
 
-# ====== ✅ Bybit ENV (추가: Bybit 포지션 공유) ======
-BYBIT_API_KEY = E("BYBIT_API_KEY")
-BYBIT_API_SECRET = E("BYBIT_API_SECRET")
-BYBIT_BASE_URL = E("BYBIT_BASE_URL", "https://api.bybit.com")
-BYBIT_RECV_WINDOW = Ei("BYBIT_RECV_WINDOW", 5000)
-ENABLE_BYBIT = E("ENABLE_BYBIT", "1").lower()  # 기본 on (원하면 Render에서 0/off 로 끄면 됨)
-# ====== ✅ Bybit ENV 끝 ======
-
-
 # ===== Utils =====
 def now_kst() -> datetime:
     return datetime.now(tz=KST)
@@ -135,10 +126,7 @@ def fmt_qty(v: float) -> str:
     return f"{x:,.{d}f}"
 
 def base_asset(symbol: str) -> str:
-    # ✅ Bybit 표시용 "(Bybit)" 같은 suffix가 붙어도 base가 정상 추출되도록 보강 (기존 심볼 영향 최소)
-    s = (symbol or "").strip()
-    s = re.sub(r"\s*\([^)]*\)\s*$", "", s).strip()
-    s = s.upper()
+    s = (symbol or "").upper()
     for sep in ["-", "/", "_"]:
         if sep in s:
             return s.split(sep)[0]
@@ -486,150 +474,6 @@ def fetch_income(symbol: str, start_ms: int, end_ms: int) -> List[Dict[str, Any]
     return []
 
 
-# ====== ✅ Bybit (추가: 포지션 공유) ======
-def bybit_req(path: str, params: Optional[Dict[str, Any]] = None, method: str = "GET") -> Optional[Dict[str, Any]]:
-    """
-    Bybit V5 private REST request (HMAC-SHA256)
-    """
-    if not (BYBIT_API_KEY and BYBIT_API_SECRET):
-        return None
-
-    p = dict(params or {})
-    qs = urlencode(sorted(p.items(), key=lambda x: x[0]), doseq=True)
-    ts = str(int(time.time() * 1000))
-    recv = str(BYBIT_RECV_WINDOW)
-    payload = qs if method.upper() == "GET" else (sjson(p) if p else "")
-
-    sign_str = ts + BYBIT_API_KEY + recv + payload
-    sig = hmac.new(BYBIT_API_SECRET.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
-
-    headers = {
-        "X-BAPI-API-KEY": BYBIT_API_KEY,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": recv,
-        "X-BAPI-SIGN": sig,
-        "Content-Type": "application/json",
-    }
-
-    url = f"{BYBIT_BASE_URL}{path}"
-    if method.upper() == "GET" and qs:
-        url = f"{url}?{qs}"
-
-    try:
-        if method.upper() == "POST":
-            r = requests.post(url, headers=headers, data=payload.encode("utf-8"), timeout=TIMEOUT)
-        else:
-            r = requests.get(url, headers=headers, timeout=TIMEOUT)
-
-        if r.status_code >= 400:
-            logging.warning("Bybit %s %s %s", r.status_code, path, r.text[:240])
-            return None
-
-        j = r.json()
-        if isinstance(j, dict) and j.get("retCode") not in (0, "0", None):
-            logging.warning("Bybit retCode=%s path=%s msg=%s", j.get("retCode"), path, str(j.get("retMsg"))[:160])
-            return None
-        return j
-    except Exception as e:
-        logging.warning("Bybit err %s %s", path, e)
-        return None
-
-def fetch_bybit_positions_raw() -> List[Dict[str, Any]]:
-    """
-    USDT Perp (linear) positions
-    """
-    j = bybit_req("/v5/position/list", {"category": "linear", "settleCoin": "USDT", "limit": 200}, method="GET")
-    if not j:
-        return []
-    res = j.get("result") if isinstance(j, dict) else None
-    if not isinstance(res, dict):
-        return []
-    arr = res.get("list")
-    if isinstance(arr, list):
-        return [x for x in arr if isinstance(x, dict)]
-    return []
-
-def norm_bybit_pos(it: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    symbol = str(it.get("symbol") or "").strip()
-    if not symbol:
-        return None
-
-    size = asf(it.get("size") or it.get("positionSize") or it.get("qty") or 0)
-    if size <= 0:
-        return None
-
-    sraw = str(it.get("side") or it.get("positionSide") or "").lower()
-    if sraw in ("buy", "long"):
-        side = "Long"
-    elif sraw in ("sell", "short"):
-        side = "Short"
-    else:
-        side = "Long"
-
-    qty = abs(size)
-
-    entry = asf(it.get("avgPrice") or it.get("entryPrice") or 0)
-    mark = asf(it.get("markPrice") or it.get("lastPrice") or it.get("indexPrice") or entry, entry)
-
-    upl = asf(it.get("unrealisedPnl") or it.get("unrealizedPnl") or 0)
-    rpl = asf(it.get("curRealisedPnl") or it.get("cumRealisedPnl") or it.get("realisedPnl") or 0)
-
-    lev = asf(it.get("leverage") or 0, 0.0)
-
-    tm = str(it.get("tradeMode") or it.get("marginMode") or "")
-    if tm in ("1", "isolated", "Isolated"):
-        margin_mode = "Isolated"
-    elif tm in ("0", "cross", "Cross"):
-        margin_mode = "Cross"
-    else:
-        margin_mode = "Isolated" if "isol" in tm.lower() else "Cross"
-
-    value = asf(it.get("positionValue") or it.get("notionalValue") or (qty * mark), qty * mark)
-    margin = asf(it.get("positionIM") or it.get("positionMargin") or it.get("initialMargin") or (value / lev if lev > 0 else 0), (value / lev if lev > 0 else 0))
-    if lev <= 0:
-        lev = (value / margin) if margin > 0 else 1.0
-
-    u_pct = (upl / margin * 100) if margin else 0
-
-    symbol_show = f"{symbol} (Bybit)"
-
-    return {
-        "exchange": "BYBIT",
-        "symbol": symbol_show,
-        "base": base_asset(symbol_show),
-        "side": side,
-        "qty": qty,
-        "entry_price": entry,
-        "mark_price": mark,
-        "u_pnl": upl,
-        "r_pnl": rpl,
-        "leverage": lev,
-        "margin_mode": margin_mode,
-        "value": value,
-        "margin": margin,
-        "u_pnl_pct": u_pct,
-        "raw": it,
-    }
-
-def fetch_bybit_positions() -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    for it in fetch_bybit_positions_raw():
-        n = norm_bybit_pos(it)
-        if n:
-            out.append(n)
-    return out
-
-def fetch_positions_all() -> List[Dict[str, Any]]:
-    """
-    BingX(기존) + Bybit(추가)
-    """
-    out = fetch_positions()
-    if ENABLE_BYBIT in ("1", "on", "true", "yes", "y"):
-        out += fetch_bybit_positions()
-    return out
-# ====== ✅ Bybit 끝 ======
-
-
 # ===== Template Lock =====
 def tpl_open(p: Dict[str, Any]) -> str:
     head = "📈 *포지션 오픈*" if p["side"] == "Long" else "📉 *포지션 오픈*"
@@ -647,6 +491,7 @@ def tpl_open(p: Dict[str, Any]) -> str:
         f"🕒 {to_kst()}"
     )
 
+# ✅ 요청 포맷 반영 (Entry 윗줄 유지)
 def tpl_add(prev: Dict[str, Any], cur: Dict[str, Any]) -> str:
     return (
         f"➕ *포지션 추가 진입*\n"
@@ -662,6 +507,7 @@ def tpl_add(prev: Dict[str, Any], cur: Dict[str, Any]) -> str:
         f"🕒 {to_kst()}"
     )
 
+# ✅ 포지션 감소 알림 추가 (같은 레이아웃)
 def tpl_reduce(prev: Dict[str, Any], cur: Dict[str, Any]) -> str:
     return (
         f"➖ *포지션 감소*\n"
@@ -701,6 +547,7 @@ def tpl_barcode(side, symbol, price, tf, ts):
     title = "🟢🐳 *바코드 · 매수(Long)*" if side == "buy" else "🔴🐳 *바코드 · 매도(Short)*"
     return f"{title}\n{symbol} | {price} | {tf}\n_\"바코드 신호는 보조근거로 활용하시길 권장드립니다.\"_\n🕒 {to_kst(ts)}"
 
+# ✅ CHANGE: zone(구간 번호) 반영. zone 없으면 "" → "구간  지지/저항" 형태로 공백 유지
 def tpl_prism(side, symbol, lo, hi, zone, ts):
     zone = "" if zone is None else str(zone)
     title = f"🟢 *구간 {zone} 지지 준비 (Prism)* 🟢 " if side == "buy" else f"🔴 *구간 {zone} 저항 준비 (Prism)* 🔴 "
@@ -710,6 +557,7 @@ def tpl_rsi(side, symbol, price, tf, fire, ts):
     title = f"🟢🤖 *RSI · 매수(Long) · {fire}*" if side == "buy" else f"🔴🤖 *RSI · 매도(Short) · {fire}*"
     return f"{title}\n{symbol} | {price} | {tf}\n_\"RSI 신호는 보조근거로 활용하시길 권장드립니다.\"_ \n🕒 {to_kst(ts)}"
 
+# ⚠️ 요청사항 유지: 판테라 문구/노랑별/노랑 표기 절대 유지
 def tpl_panterra(side, symbol, price, tf, ts):
     strategy = "PanTerra"
     if side == "buy":
@@ -760,11 +608,18 @@ HELP_TEXT = (
 
 # ===== Signal Parse =====
 def _parse_plain_text_payload(raw: str) -> Dict[str, Any]:
+    """
+    TradingView가 text/plain으로 보내는 경우 대응
+    - JSON 문자열
+    - querystring(key=value&...)
+    - 라인/쉼표 기반 key:value 또는 key=value
+    """
     out: Dict[str, Any] = {}
     raw = (raw or "").strip()
     if not raw:
         return out
 
+    # 1) JSON 문자열
     try:
         j = json.loads(raw)
         if isinstance(j, dict):
@@ -772,6 +627,7 @@ def _parse_plain_text_payload(raw: str) -> Dict[str, Any]:
     except:
         pass
 
+    # 2) querystring
     if "=" in raw and "&" in raw and "\n" not in raw:
         try:
             qs = parse_qs(raw, keep_blank_values=True)
@@ -784,6 +640,7 @@ def _parse_plain_text_payload(raw: str) -> Dict[str, Any]:
         except:
             pass
 
+    # 3) line/csv key:value or key=value
     lines: List[str] = []
     for block in raw.splitlines():
         block = block.strip()
@@ -803,10 +660,12 @@ def _parse_plain_text_payload(raw: str) -> Dict[str, Any]:
     return out
 
 def parse_tv_payload(req) -> Dict[str, Any]:
+    # JSON 우선
     j = req.get_json(silent=True)
     if isinstance(j, dict):
         return j
 
+    # form-data 대응
     try:
         if req.form:
             d = dict(req.form)
@@ -815,12 +674,14 @@ def parse_tv_payload(req) -> Dict[str, Any]:
     except:
         pass
 
+    # text/plain 대응
     raw = (req.data or b"").decode("utf-8", errors="ignore")
     p = _parse_plain_text_payload(raw)
     if p:
         return p
     return {}
 
+# --- 가격 1 오인 방지 보조 ---
 _TF_NUM_CANDIDATES = {"1", "3", "5", "10", "15", "30", "45", "60", "120", "180", "240", "360", "720", "1440"}
 
 def _is_num_token(v: Any) -> bool:
@@ -856,6 +717,7 @@ def _extract_price_from_text(raw_text: str, tf: str) -> str:
     if not t:
         return "-"
 
+    # 1) "symbol | price | tf" 패턴 우선
     if "|" in t:
         parts = [p.strip() for p in t.split("|")]
         if len(parts) >= 3:
@@ -865,10 +727,12 @@ def _extract_price_from_text(raw_text: str, tf: str) -> str:
                 if not (_looks_like_tf_multiplier(mid, tf) and re.fullmatch(r"\d+[mhdw]", right)):
                     return mid
 
+    # 2) 소수점 가격 우선
     m_dec = re.search(r'(?<!\d)(\d+\.\d+)(?!\d)', t.replace(",", ""))
     if m_dec:
         return m_dec.group(1)
 
+    # 3) 정수는 3자리 이상만 가격으로 인정
     m_int = re.search(r'(?<!\d)(\d{3,})(?!\d)', t.replace(",", ""))
     if m_int:
         return m_int.group(1)
@@ -876,23 +740,31 @@ def _extract_price_from_text(raw_text: str, tf: str) -> str:
     return "-"
 
 def _extract_prism_zone(payload: Dict[str, Any], raw_text: str) -> str:
+    """
+    ✅ CHANGE: Prism '구간 N' 숫자 추출
+    - 없으면 "" (요청: 기본값 4 금지, 공백 유지)
+    """
+    # 1) payload 기반 후보
     for k in ["zone", "zone_no", "zone_num", "level", "lvl", "step", "segment", "stage", "section", "area"]:
         if k in payload:
             v = str(payload.get(k) or "").strip()
             if v.isdigit():
                 return v
 
+    # 2) text 기반: "구간6", "구간 6"
     t = (raw_text or "")
     m = re.search(r"구간\s*(\d+)", t)
     if m:
         return m.group(1)
 
+    # 3) 영문도 혹시
     m2 = re.search(r"\bzone\s*(\d+)\b", t, flags=re.IGNORECASE)
     if m2:
         return m2.group(1)
 
     return ""
 
+# ✅ (추가) Prism 레인지 텍스트 파싱: "65777.8 ~ 65811.9"
 def _extract_range_from_text(raw_text: str) -> Tuple[str, str]:
     t = (raw_text or "").replace(",", "")
     m = re.search(r'(?<!\d)(\d+(?:\.\d+)?)[ ]*~[ ]*(\d+(?:\.\d+)?)(?!\d)', t)
@@ -924,6 +796,7 @@ def infer_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
     kind = "unknown"
     if ("barcode" in blob) or ("바코드" in blob):
         kind = "barcode"
+    # ✅ CHANGE: "구간\s*[1-9]" 문자열 포함이 아니라 정규식으로 안정 판별
     elif ("prism" in blob) or ("프리즘" in blob) or ("지지 준비" in blob) or ("저항 준비" in blob) or re.search(r"구간\s*\d+", blob):
         kind = "prism"
     elif ("rsi" in blob) or re.search(r"\brsi\b", blob):
@@ -939,6 +812,7 @@ def infer_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
     if any(x in action for x in ["buy", "long"]):
         side = "buy"
 
+    # symbol 보강
     ss = str(symbol).strip() if symbol else ""
     if not ss:
         ex_sym = _extract_symbol_from_text(raw_text)
@@ -947,6 +821,7 @@ def infer_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not ss:
         ss = "BYBIT·BTCUSDT.P"
 
+    # tf 보강
     if tf in ("", "None", "none"):
         ex_tf = _extract_tf_from_text(raw_text)
         if ex_tf:
@@ -954,6 +829,7 @@ def infer_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not tf:
         tf = "1m"
 
+    # price: 신뢰 높은 필드 우선
     price = "-"
     for k in ["close", "last", "mark", "entry", "open", "high", "low", "price"]:
         if k not in payload:
@@ -971,13 +847,16 @@ def infer_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
         price = s
         break
 
+    # 필드에서 못 찾으면 text에서 보강
     if price == "-":
         price = _extract_price_from_text(raw_text, tf)
 
+    # ===== 여기만 Prism 레인지 보강 수정(그 외 로직 변경 없음) =====
     lo = payload.get("low") or payload.get("support_low") or payload.get("zone_low") or payload.get("from") or payload.get("min")
     hi = payload.get("high") or payload.get("support_high") or payload.get("zone_high") or payload.get("to") or payload.get("max")
 
     if kind == "prism":
+        # Prism은 메시지 텍스트에 "65777.8 ~ 65811.9"가 들어오는 케이스가 많아서 우선 보강
         tlo, thi = _extract_range_from_text(raw_text)
         if (lo is None or str(lo).strip() in ("", "-", "None", "none")) and tlo != "-":
             lo = tlo
@@ -1002,6 +881,7 @@ def panterra_throttle(symbol: str, side: str, sec=1800) -> bool:
     k = f"throttle:panterra:{symbol}:{side}"
     now = int(time.time())
 
+    # Redis 우선
     last = R.get(k)
     if last is not None:
         try:
@@ -1012,6 +892,7 @@ def panterra_throttle(symbol: str, side: str, sec=1800) -> bool:
         R.set(k, str(now))
         return False
 
+    # Redis 없을 때 메모리 fallback
     last_mem = MEM_THROTTLE.get(k)
     if last_mem is not None and (now - int(last_mem) < sec):
         return True
@@ -1075,115 +956,68 @@ def hist_list(d: str) -> List[Dict[str, Any]]:
     return out
 
 
-# ====== ✅ 수정(핵심): income 기반 값 튀는 것 방지(필터+검증+fallback) ======
-def _ms(v: Any) -> Optional[int]:
-    try:
-        if v is None:
-            return None
-        x = int(float(str(v).strip()))
-        if x <= 0:
-            return None
-        # 10자리(초)면 ms로 보정
-        if x < 10_000_000_000:
-            x *= 1000
-        return x
-    except:
-        return None
-
-def _norm_sym(s: str) -> str:
-    s = (s or "").strip()
-    s = re.sub(r"\s*\([^)]*\)\s*$", "", s).strip()  # "(Bybit)" 제거
-    return s
-
+# ====== ✅ 수정(1): income 기반 분해/정산 함수 추가 + fee_calc 교체 (그 외 로직/포맷 영향 없음) ======
 def _income_split(symbol: str, st: datetime, en: datetime) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
-    ✅ BingX income 기반으로
-    - closed_pnl(실현손익 계열)
-    - fee_funding(수수료/펀딩 계열)
-    - realized(=closed+fee_funding)
-    를 '트레이딩 관련 타입'만 집계해서 리턴.
+    ✅ 거래소 정산(income) 기반으로
+    - closed_pnl(정산 손익)
+    - fee_funding(수수료+펀딩)
+    - realized(최종 실현손익)
+    를 최대한 안정적으로 분해해서 리턴
 
-    ⚠️ income에 보너스/리베이트/기타 항목이 섞여 튀는 케이스가 있어서:
-    - 타입 필터링
-    - 시간/심볼 추가 체크(가능한 범위)
-    를 적용함.
+    실패(None)면 호출부에서 기존 추정치 로직으로 fallback
     """
-    if "BYBIT" in (symbol or "").upper():
-        return None, None, None
-
-    sym = _norm_sym(symbol)
-    st_ms = int(st.astimezone(UTC).timestamp() * 1000)
-    en_ms = int(en.astimezone(UTC).timestamp() * 1000)
-
-    recs = fetch_income(sym, st_ms, en_ms)
+    recs = fetch_income(symbol, int(st.astimezone(UTC).timestamp() * 1000), int(en.astimezone(UTC).timestamp() * 1000))
     if not recs:
         return None, None, None
 
     closed_sum = 0.0
     fee_funding_sum = 0.0
+    realized_sum = 0.0
 
-    # 포함/제외 키워드
-    fee_keys = ("commission", "fee", "funding", "fund")
-    pnl_keys = ("realized", "pnl", "close", "settle", "trade")
-    exclude_keys = (
-        "bonus", "rebate", "trial", "coupon", "airdrop", "transfer",
-        "deposit", "withdraw", "referral", "agent", "reward"
-    )
+    # ✅ 혹시 API가 심볼 필터를 무시/느슨하게 처리하는 경우가 있어서
+    #    응답에 섞여 들어온 다른 심볼 income을 2차로 걸러줌 (Realized 튐 방지)
+    req_norm = re.sub(r"[^A-Za-z0-9]", "", symbol).upper()
 
-    # 시간 버퍼(응답/서버 시각 오차 대비)
-    buf = 5 * 60 * 1000  # 5분
-
-    hit = 0
     for r in recs:
-        if not isinstance(r, dict):
-            continue
-
-        # (가능하면) 심볼 일치 확인
-        rsym = r.get("symbol") or r.get("ticker") or r.get("pair")
-        if rsym:
-            if _norm_sym(str(rsym)) != sym:
+        rec_sym = str(r.get("symbol") or r.get("contract") or r.get("ticker") or "").strip()
+        if rec_sym:
+            rec_norm = re.sub(r"[^A-Za-z0-9]", "", rec_sym).upper()
+            if req_norm and rec_norm and (req_norm not in rec_norm and rec_norm not in req_norm):
                 continue
 
-        # (가능하면) 시간 범위 확인
-        t_ms = _ms(r.get("time") or r.get("timestamp") or r.get("createdTime") or r.get("created_time") or r.get("tradeTime") or r.get("trade_time"))
-        if t_ms is not None:
-            if t_ms < (st_ms - buf) or t_ms > (en_ms + buf):
-                continue
+        typ = str(r.get("incomeType") or r.get("type") or r.get("bizType") or r.get("income_type") or "").lower()
+        inc = asf(r.get("income") or r.get("profit") or r.get("amount") or r.get("realizedPnl") or 0)
 
-        typ = str(r.get("incomeType") or r.get("type") or r.get("bizType") or r.get("income_type") or "").lower().strip()
-        inc = asf(r.get("income") or r.get("profit") or r.get("amount") or r.get("realizedPnl") or r.get("realisedPnl") or 0)
+        # income 원본 합 = 최종 실현(거래소 정산에 가장 가까운 기준)
+        realized_sum += inc
 
-        if abs(inc) <= 1e-12:
-            continue
-
-        # 제외 우선
-        if typ and any(k in typ for k in exclude_keys):
-            continue
-
-        # 분류
-        if typ and any(k in typ for k in fee_keys):
+        # 수수료/펀딩은 타입 키워드로 최대한 분리
+        if any(x in typ for x in ["commission", "fee", "funding", "fund"]):
             fee_funding_sum += inc
-            hit += 1
             continue
 
-        if typ and any(k in typ for k in pnl_keys):
-            closed_sum += inc
-            hit += 1
-            continue
+        # 나머지는 손익으로 귀속(거래소 타입명이 달라도 보통 손익성 항목)
+        closed_sum += inc
 
-        # typ가 비었거나 애매한 값은 "안전하게 제외"
-        # (여기서 포함해버리면 튀는 값이 다시 생김)
-        continue
+    return closed_sum, fee_funding_sum, realized_sum
 
-    if hit == 0:
-        return None, None, None
 
-    realized = closed_sum + fee_funding_sum
-    return closed_sum, fee_funding_sum, realized
+def fee_calc(symbol: str, st: datetime, en: datetime, closed: float, entry_v: float, exit_v: float) -> Tuple[float, float, float]:
+    """
+    ✅ CLOSE 정산값을 서로 일치시키기 위한 계산
+    - return: (closed_pnl, fee_funding, realized)
+    """
+    c, ff, real = _income_split(symbol, st, en)
+    if c is not None:
+        # income 기반 확정
+        return c, ff, real
 
-def _estimate_fee(entry_v: float, exit_v: float) -> float:
-    return -(abs(entry_v) + abs(exit_v)) * TAKER_FEE_RATE
-# ====== ✅ 수정 끝 ======
+    # income 못 가져오면 기존 추정 fallback
+    ff = -(abs(entry_v) + abs(exit_v)) * TAKER_FEE_RATE
+    return closed, ff, closed + ff
+# ====== ✅ 수정(1) 끝 ======
+
 
 
 def send_signal_alert(text: str):
@@ -1195,6 +1029,9 @@ def send_signal_alert(text: str):
     logging.info("signal alert sent=%s/%s", sent, len(CHAT_IDS))
 
 def send_signal_alert_plain(text: str):
+    """
+    ✅ CHANGE: kind 미정(unknown) 원문 그대로 발송(포맷/마크다운 없음)
+    """
     sent = 0
     for cid in CHAT_IDS:
         if (not is_group(cid)) or sw_get("signal", cid) == "1":
@@ -1210,28 +1047,26 @@ def send_pos_alert(text: str):
                 sent += 1
     logging.info("position alert sent=%s/%s", sent, len(CHAT_IDS_POSITION))
 
+# -----------------------
+# 이하 (포지션/리포트/명령/라우트/부트스트랩) 원본 그대로
+# 단, ✅ 수정(2): OPEN/ADD/REDUCE rPnL 표시만 income으로 보강
+# -----------------------
 
 def process_positions(send_alert=True) -> Dict[str, Any]:
     cur: Dict[str, Dict[str, Any]] = {}
-
-    for p in fetch_positions_all():
-        if str(p.get("exchange", "")).upper() == "BYBIT":
-            k = f"BYBIT|{pkey(p['symbol'], p['side'])}"
-        else:
-            k = pkey(p["symbol"], p["side"])
-        cur[k] = p
-
+    for p in fetch_positions():
+        cur[pkey(p["symbol"], p["side"])] = p
     prev = open_state()
 
+    # ====== ✅ 수정(2): rPnL 표시를 세션 시작 이후 income 합계로 보강 (표시만, 로직/포맷 불변) ======
     def _rpnL_since(symbol: str, start_iso: str) -> Optional[float]:
-        if "BYBIT" in (symbol or "").upper():
-            return None
         st = iso_parse(start_iso) or now_kst()
         en = now_kst()
         c, ff, real = _income_split(symbol, st, en)
         if real is None:
             return None
         return real
+    # ====== ✅ 수정(2) 끝 ======
 
     if not init_done():
         for k, p in cur.items():
@@ -1285,6 +1120,7 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
                 },
             )
             if send_alert:
+                # ✅ rPnL 표시 보강(알림 표시만)
                 p_show = dict(p)
                 rp = _rpnL_since(p.get("symbol", ""), start_iso)
                 if rp is not None:
@@ -1309,6 +1145,7 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
                 dv = max(asf(p.get("value")) - asf(o.get("value")), (q1 - q0) * asf(p.get("entry_price")))
                 s["total_entry_value"] = asf(s.get("total_entry_value")) + max(dv, 0.0)
                 if send_alert:
+                    # ✅ rPnL 표시 보강(알림 표시만)
                     p_show = dict(p)
                     rp = _rpnL_since(p.get("symbol", ""), str(s.get("start_ts", "")))
                     if rp is not None:
@@ -1321,6 +1158,7 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
                 rv = max(asf(o.get("value")) - asf(p.get("value")), rq * asf(p.get("mark_price")))
                 s["total_exit_value"] = asf(s.get("total_exit_value")) + max(rv, 0.0)
                 if send_alert:
+                    # ✅ rPnL 표시 보강(알림 표시만)
                     p_show = dict(p)
                     rp = _rpnL_since(p.get("symbol", ""), str(s.get("start_ts", "")))
                     if rp is not None:
@@ -1361,31 +1199,10 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
         s["total_exit_value"] = asf(s.get("total_exit_value")) + max(remain_qty * close_p, 0.0)
 
         tv_in, tv_out = asf(s.get("total_entry_value")), asf(s.get("total_exit_value"))
-        closed_est = (tv_out - tv_in) if s.get("side") == "Long" else (tv_in - tv_out)
-
+        closed = (tv_out - tv_in) if s.get("side") == "Long" else (tv_in - tv_out)
         st = iso_parse(s.get("start_ts", "")) or now_kst()
         en = now_kst()
-
-        # ✅ income 시도(트레이딩 관련 타입만 + 검증 + 이상하면 fallback)
-        fee_est = _estimate_fee(tv_in, tv_out)
-        real_est = closed_est + fee_est
-
-        closed = closed_est
-        fee = fee_est
-        real = real_est
-
-        c_inc, ff_inc, real_inc = _income_split(s.get("symbol", ""), st, en)
-        if c_inc is not None and ff_inc is not None and real_inc is not None:
-            # 검증 기준: notional 대비 5% 이내(최소 3 USDT)면 income 채택
-            notional = max(abs(tv_in), abs(tv_out), 0.0)
-            th = max(3.0, notional * 0.05)
-            if abs(real_inc - real_est) <= th:
-                closed = c_inc
-                fee = ff_inc
-                real = real_inc
-            else:
-                # 튀면 그대로 fallback(추정치)
-                pass
+        closed_pnl, fee, real = fee_calc(s.get("symbol", ""), st, en, closed, tv_in, tv_out)
 
         row = {
             "symbol": s.get("symbol"),
@@ -1396,7 +1213,7 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
             "close_price": close_p,
             "total_entry_value": tv_in,
             "total_exit_value": tv_out,
-            "closed_pnl": float(f"{closed:.8f}"),
+            "closed_pnl": float(f"{closed_pnl:.8f}"),
             "fee_funding": float(f"{fee:.8f}"),
             "realized": float(f"{real:.8f}"),
             "margin_mode": s.get("margin_mode", "Isolated"),
@@ -1534,6 +1351,9 @@ def send_report_detail(chat_id: str, date_str: Optional[str] = None):
     tg_send_chunk(BOT_TOKEN_POSITION, chat_id, report_detail_text(date_str, now, rows_until(date_str, now)))
 
 def maybe_auto_report() -> Dict[str, Any]:
+    """
+    ✅ 자동 리포트: 매일 23:50에만 1회 발송
+    """
     cfg_init()
     if cfg_get("report_auto", "off").lower() != "on":
         return {"sent": False, "reason": "auto_off"}
@@ -1609,7 +1429,7 @@ def switch_logs(n=10) -> str:
     return "\n".join(lines)
 
 def snapshot_text() -> str:
-    ps = fetch_positions_all()
+    ps = fetch_positions()
     if not ps:
         return f"📭 현재 오픈 포지션이 없어.\n\n🕒 {to_kst()}"
     lines = ["📌 *현재 포지션 스냅샷*", "━━━━━━━━━━━━━━"]
@@ -1637,6 +1457,7 @@ def handle_command(chat_id: str, uid: str, text: str) -> Optional[str]:
     if cmd == "/status":
         return status_text()
 
+    # report 조회는 누구나 가능
     if cmd in ("/report_summary", "/report"):
         d = arg if re.match(r"^\d{4}-\d{2}-\d{2}$", arg or "") else None
         send_report_summary(chat_id, d)
@@ -1659,6 +1480,7 @@ def handle_command(chat_id: str, uid: str, text: str) -> Optional[str]:
             f"🕒 {to_kst()}"
         )
 
+    # 이하 관리자
     if not is_admin(uid):
         return "권한이 없어. (ADMIN_USER_IDS 확인)"
 
@@ -1730,6 +1552,7 @@ def root():
 def tv_webhook():
     payload = parse_tv_payload(request)
 
+    # secret를 query/body/header 모두 허용
     req_secret = (
         request.args.get("secret", "")
         or str(payload.get("secret", ""))
@@ -1745,6 +1568,7 @@ def tv_webhook():
     inf = infer_signal(payload)
     msg = build_signal_msg(payload)
 
+    # ✅ CHANGE: kind 미정이면 포맷 없이 '원문 그대로' 발송
     if not msg and inf.get("kind") == "unknown":
         raw_text = str(payload.get("text") or payload.get("message") or payload.get("comment") or "").strip()
         if not raw_text:
