@@ -1011,7 +1011,7 @@ def fee_calc(symbol: str, st: datetime, en: datetime, closed: float, entry_v: fl
     c, ff, real = _income_split(symbol, st, en)
     if c is not None:
         # income 기반 확정
-        return c, ff, real
+        return c, ff, (c + ff)
 
     # income 못 가져오면 기존 추정 fallback
     ff = -(abs(entry_v) + abs(exit_v)) * TAKER_FEE_RATE
@@ -1265,13 +1265,13 @@ def rows_until(date_str: str, end_dt: datetime) -> List[Dict[str, Any]]:
 
 def report_summary_text(date_str: str, now_dt: datetime, rows: List[Dict[str, Any]]) -> str:
     total = len(rows)
-    win = sum(1 for r in rows if asf(r.get("realized")) > 0)
+    win = sum(1 for r in rows if (asf(r.get("closed_pnl")) + asf(r.get("fee_funding"))) > 0)
     lose = total - win
     wr = (win / total * 100) if total else 0
 
     s_closed = sum(asf(r.get("closed_pnl")) for r in rows)
     s_fee = sum(asf(r.get("fee_funding")) for r in rows)
-    s_real = sum(asf(r.get("realized")) for r in rows)
+    s_real = s_closed + s_fee
 
     cnt: Dict[str, int] = {}
     for r in rows:
@@ -1299,7 +1299,7 @@ def report_detail_text(date_str: str, now_dt: datetime, rows: List[Dict[str, Any
     en = now_dt.astimezone(KST).strftime("%H:%M")
     s_closed = sum(asf(r.get("closed_pnl")) for r in rows)
     s_fee = sum(asf(r.get("fee_funding")) for r in rows)
-    s_real = sum(asf(r.get("realized")) for r in rows)
+    s_real = s_closed + s_fee
 
     p = ["📑 *일일 상세 리포트*", "━━━━━━━━━━━━━━", f"기간 : {st} ~ {en} (KST)", ""]
     if not rows:
@@ -1327,7 +1327,7 @@ def report_detail_text(date_str: str, now_dt: datetime, rows: List[Dict[str, Any
             f"총 종료금액 : {fmt_num(asf(r.get('total_exit_value')),2)} USDT",
             f"Closed PnL : {sign(asf(r.get('closed_pnl')))} USDT",
             f"Fee+Funding: {sign(asf(r.get('fee_funding')))} USDT",
-            f"*Realized   : {sign(asf(r.get('realized')))} USDT*",
+            f"*Realized   : {sign((asf(r.get('closed_pnl')) + asf(r.get('fee_funding'))))} USDT*",
             "",
         ]
 
