@@ -27,6 +27,7 @@ def Ei(k: str, d: int) -> int:
         return int(E(k, str(d)))
     except:
         return d
+#
 
 BOT_TOKEN = E("BOT_TOKEN")
 BOT_TOKEN_POSITION = E("BOT_TOKEN_POSITION", BOT_TOKEN)
