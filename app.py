@@ -55,6 +55,15 @@ REPORT_AUTO_CHAT_DEFAULT = E("REPORT_AUTO_CHAT")
 TAKER_FEE_RATE = float(E("TAKER_FEE_RATE", "0.0005"))
 TIMEOUT = Ei("REQUEST_TIMEOUT", 15)
 
+# ====== ✅ Bybit ENV (추가: Bybit 포지션 공유) ======
+BYBIT_API_KEY = E("BYBIT_API_KEY")
+BYBIT_API_SECRET = E("BYBIT_API_SECRET")
+BYBIT_BASE_URL = E("BYBIT_BASE_URL", "https://api.bybit.com")
+BYBIT_RECV_WINDOW = Ei("BYBIT_RECV_WINDOW", 5000)
+ENABLE_BYBIT = E("ENABLE_BYBIT", "1").lower()  # 기본 on (원하면 Render에서 0/off 로 끄면 됨)
+# ====== ✅ Bybit ENV 끝 ======
+
+
 # ===== Utils =====
 def now_kst() -> datetime:
     return datetime.now(tz=KST)
@@ -126,7 +135,10 @@ def fmt_qty(v: float) -> str:
     return f"{x:,.{d}f}"
 
 def base_asset(symbol: str) -> str:
-    s = (symbol or "").upper()
+    # ✅ Bybit 표시용 "(Bybit)" 같은 suffix가 붙어도 base가 정상 추출되도록 보강 (기존 심볼 영향 최소)
+    s = (symbol or "").strip()
+    s = re.sub(r"\s*\([^)]*\)\s*$", "", s).strip()
+    s = s.upper()
     for sep in ["-", "/", "_"]:
         if sep in s:
             return s.split(sep)[0]
@@ -472,6 +484,155 @@ def fetch_income(symbol: str, start_ms: int, end_ms: int) -> List[Dict[str, Any]
         if arr:
             return arr
     return []
+
+
+# ====== ✅ Bybit (추가: 포지션 공유) ======
+def bybit_req(path: str, params: Optional[Dict[str, Any]] = None, method: str = "GET") -> Optional[Dict[str, Any]]:
+    """
+    Bybit V5 private REST request (HMAC-SHA256)
+    """
+    if not (BYBIT_API_KEY and BYBIT_API_SECRET):
+        return None
+
+    p = dict(params or {})
+    # Bybit v5: signature payload = queryString(for GET) / body(for POST)
+    qs = urlencode(sorted(p.items(), key=lambda x: x[0]), doseq=True)
+    ts = str(int(time.time() * 1000))
+    recv = str(BYBIT_RECV_WINDOW)
+    payload = qs if method.upper() == "GET" else (sjson(p) if p else "")
+
+    sign_str = ts + BYBIT_API_KEY + recv + payload
+    sig = hmac.new(BYBIT_API_SECRET.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
+
+    headers = {
+        "X-BAPI-API-KEY": BYBIT_API_KEY,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": recv,
+        "X-BAPI-SIGN": sig,
+        "Content-Type": "application/json",
+    }
+
+    url = f"{BYBIT_BASE_URL}{path}"
+    if method.upper() == "GET" and qs:
+        url = f"{url}?{qs}"
+
+    try:
+        if method.upper() == "POST":
+            r = requests.post(url, headers=headers, data=payload.encode("utf-8"), timeout=TIMEOUT)
+        else:
+            r = requests.get(url, headers=headers, timeout=TIMEOUT)
+
+        if r.status_code >= 400:
+            logging.warning("Bybit %s %s %s", r.status_code, path, r.text[:240])
+            return None
+
+        j = r.json()
+        # Bybit returns retCode/retMsg
+        if isinstance(j, dict) and j.get("retCode") not in (0, "0", None):
+            logging.warning("Bybit retCode=%s path=%s msg=%s", j.get("retCode"), path, str(j.get("retMsg"))[:160])
+            return None
+        return j
+    except Exception as e:
+        logging.warning("Bybit err %s %s", path, e)
+        return None
+
+def fetch_bybit_positions_raw() -> List[Dict[str, Any]]:
+    """
+    USDT Perp (linear) positions
+    """
+    j = bybit_req("/v5/position/list", {"category": "linear", "settleCoin": "USDT", "limit": 200}, method="GET")
+    if not j:
+        return []
+    res = j.get("result") if isinstance(j, dict) else None
+    if not isinstance(res, dict):
+        return []
+    arr = res.get("list")
+    if isinstance(arr, list):
+        return [x for x in arr if isinstance(x, dict)]
+    return []
+
+def norm_bybit_pos(it: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    symbol = str(it.get("symbol") or "").strip()
+    if not symbol:
+        return None
+
+    size = asf(it.get("size") or it.get("positionSize") or it.get("qty") or 0)
+    if size <= 0:
+        return None
+
+    sraw = str(it.get("side") or it.get("positionSide") or "").lower()
+    if sraw in ("buy", "long"):
+        side = "Long"
+    elif sraw in ("sell", "short"):
+        side = "Short"
+    else:
+        side = "Long"
+
+    qty = abs(size)
+
+    entry = asf(it.get("avgPrice") or it.get("entryPrice") or 0)
+    mark = asf(it.get("markPrice") or it.get("lastPrice") or it.get("indexPrice") or entry, entry)
+
+    upl = asf(it.get("unrealisedPnl") or it.get("unrealizedPnl") or 0)
+    rpl = asf(it.get("curRealisedPnl") or it.get("cumRealisedPnl") or it.get("realisedPnl") or 0)
+
+    lev = asf(it.get("leverage") or 0, 0.0)
+
+    tm = str(it.get("tradeMode") or it.get("marginMode") or "")
+    # Bybit tradeMode: 0 Cross, 1 Isolated (일반적으로)
+    if tm in ("1", "isolated", "Isolated"):
+        margin_mode = "Isolated"
+    elif tm in ("0", "cross", "Cross"):
+        margin_mode = "Cross"
+    else:
+        margin_mode = "Isolated" if "isol" in tm.lower() else "Cross"
+
+    value = asf(it.get("positionValue") or it.get("notionalValue") or (qty * mark), qty * mark)
+    margin = asf(it.get("positionIM") or it.get("positionMargin") or it.get("initialMargin") or (value / lev if lev > 0 else 0), (value / lev if lev > 0 else 0))
+    if lev <= 0:
+        lev = (value / margin) if margin > 0 else 1.0
+
+    u_pct = (upl / margin * 100) if margin else 0
+
+    # ✅ 템플릿 변경 금지 대응:
+    # Bybit임을 템플릿 수정 없이 구분하기 위해 symbol 값에만 태그 추가
+    symbol_show = f"{symbol} (Bybit)"
+
+    return {
+        "exchange": "BYBIT",
+        "symbol": symbol_show,
+        "base": base_asset(symbol_show),
+        "side": side,
+        "qty": qty,
+        "entry_price": entry,
+        "mark_price": mark,
+        "u_pnl": upl,
+        "r_pnl": rpl,
+        "leverage": lev,
+        "margin_mode": margin_mode,
+        "value": value,
+        "margin": margin,
+        "u_pnl_pct": u_pct,
+        "raw": it,
+    }
+
+def fetch_bybit_positions() -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for it in fetch_bybit_positions_raw():
+        n = norm_bybit_pos(it)
+        if n:
+            out.append(n)
+    return out
+
+def fetch_positions_all() -> List[Dict[str, Any]]:
+    """
+    BingX(기존) + Bybit(추가)
+    """
+    out = fetch_positions()
+    if ENABLE_BYBIT in ("1", "on", "true", "yes", "y"):
+        out += fetch_bybit_positions()
+    return out
+# ====== ✅ Bybit 끝 ======
 
 
 # ===== Template Lock =====
@@ -956,40 +1117,75 @@ def hist_list(d: str) -> List[Dict[str, Any]]:
     return out
 
 
-# ====== ✅ 수정(1): income 기반 분해/정산 함수 추가 + fee_calc 교체 (그 외 로직/포맷 영향 없음) ======
+# ====== ✅ 수정(1): income 기반 오염 방지 split ======
 def _income_split(symbol: str, st: datetime, en: datetime) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
     ✅ 거래소 정산(income) 기반으로
     - closed_pnl(정산 손익)
     - fee_funding(수수료+펀딩)
     - realized(최종 실현손익)
-    를 최대한 안정적으로 분해해서 리턴
+    를 '오염 항목' 없이 최대한 안정적으로 분해해서 리턴
 
     실패(None)면 호출부에서 기존 추정치 로직으로 fallback
     """
-    recs = fetch_income(symbol, int(st.astimezone(UTC).timestamp() * 1000), int(en.astimezone(UTC).timestamp() * 1000))
+    if "BYBIT" in (symbol or "").upper():
+        return None, None, None
+
+    def _norm_sym(s: str) -> str:
+        s = (s or "").strip()
+        s = re.sub(r"\s*\([^)]*\)\s*$", "", s)  # "(Bybit)" 같은 suffix 제거
+        s = s.upper()
+        s = re.sub(r"[^A-Z0-9]", "", s)         # BTC-USDT -> BTCUSDT
+        return s
+
+    want = _norm_sym(symbol)
+
+    recs = fetch_income(
+        symbol,
+        int(st.astimezone(UTC).timestamp() * 1000),
+        int(en.astimezone(UTC).timestamp() * 1000),
+    )
     if not recs:
         return None, None, None
 
     closed_sum = 0.0
     fee_funding_sum = 0.0
-    realized_sum = 0.0
+    used = 0
 
     for r in recs:
-        typ = str(r.get("incomeType") or r.get("type") or r.get("bizType") or r.get("income_type") or "").lower()
-        inc = asf(r.get("income") or r.get("profit") or r.get("amount") or r.get("realizedPnl") or 0)
+        # 1) 심볼 필터 (다른 심볼 섞여오면 버림)
+        rsym = str(r.get("symbol") or r.get("ticker") or r.get("pair") or "").strip()
+        if rsym:
+            if _norm_sym(rsym) != want:
+                continue
 
-        # income 원본 합 = 최종 실현(거래소 정산에 가장 가까운 기준)
-        realized_sum += inc
-
-        # 수수료/펀딩은 타입 키워드로 최대한 분리
-        if any(x in typ for x in ["commission", "fee", "funding", "fund"]):
-            fee_funding_sum += inc
+        # 2) 자산 필터 (USDT 아닌 항목 섞이면 버림) - 없으면 그냥 통과
+        asset = str(r.get("asset") or r.get("currency") or r.get("coin") or r.get("marginCoin") or "").upper().strip()
+        if asset and asset != "USDT":
             continue
 
-        # 나머지는 손익으로 귀속(거래소 타입명이 달라도 보통 손익성 항목)
-        closed_sum += inc
+        typ = str(r.get("incomeType") or r.get("type") or r.get("bizType") or r.get("income_type") or "").lower().strip()
+        inc = asf(r.get("income") or r.get("profit") or r.get("amount") or r.get("realizedPnl") or 0)
 
+        # fee/funding
+        if ("funding" in typ) or ("commission" in typ) or (typ == "fee") or ("fee" in typ):
+            fee_funding_sum += inc
+            used += 1
+            continue
+
+        # pnl/profit
+        if ("realized" in typ) or ("pnl" in typ) or ("profit" in typ) or ("trade" in typ) or ("close" in typ) or ("settle" in typ):
+            closed_sum += inc
+            used += 1
+            continue
+
+        # 나머지는 오염 가능성 높아서 무시
+        continue
+
+    if used == 0:
+        return None, None, None
+
+    realized_sum = closed_sum + fee_funding_sum
     return closed_sum, fee_funding_sum, realized_sum
 
 
@@ -1043,12 +1239,23 @@ def send_pos_alert(text: str):
 
 def process_positions(send_alert=True) -> Dict[str, Any]:
     cur: Dict[str, Dict[str, Any]] = {}
-    for p in fetch_positions():
-        cur[pkey(p["symbol"], p["side"])] = p
+
+    # ✅ Bybit 포함 전체 포지션 조회 (BingX 기존 유지 + Bybit 추가)
+    for p in fetch_positions_all():
+        # ✅ 키 충돌 방지: Bybit은 prefix로 구분(기존 BingX 키는 그대로 유지)
+        if str(p.get("exchange", "")).upper() == "BYBIT":
+            k = f"BYBIT|{pkey(p['symbol'], p['side'])}"
+        else:
+            k = pkey(p["symbol"], p["side"])
+        cur[k] = p
+
     prev = open_state()
 
     # ====== ✅ 수정(2): rPnL 표시를 세션 시작 이후 income 합계로 보강 (표시만, 로직/포맷 불변) ======
     def _rpnL_since(symbol: str, start_iso: str) -> Optional[float]:
+        # ✅ Bybit은 BingX income 보강 스킵
+        if "BYBIT" in (symbol or "").upper():
+            return None
         st = iso_parse(start_iso) or now_kst()
         en = now_kst()
         c, ff, real = _income_split(symbol, st, en)
@@ -1191,7 +1398,16 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
         closed = (tv_out - tv_in) if s.get("side") == "Long" else (tv_in - tv_out)
         st = iso_parse(s.get("start_ts", "")) or now_kst()
         en = now_kst()
-        fee, real = fee_calc(s.get("symbol", ""), st, en, closed, tv_in, tv_out)
+
+        # ====== ✅ 수정(2): income이 정상적으로 잡힐 때만(오염 없음) 덮어쓰기 ======
+        c_inc, ff_inc, real_inc = _income_split(s.get("symbol", ""), st, en)
+        if c_inc is not None:
+            closed = c_inc
+            fee = ff_inc
+            real = real_inc
+        else:
+            fee, real = fee_calc(s.get("symbol", ""), st, en, closed, tv_in, tv_out)
+        # ====== ✅ 수정(2) 끝 ======
 
         row = {
             "symbol": s.get("symbol"),
@@ -1418,7 +1634,8 @@ def switch_logs(n=10) -> str:
     return "\n".join(lines)
 
 def snapshot_text() -> str:
-    ps = fetch_positions()
+    # ✅ Bybit 포함 스냅샷
+    ps = fetch_positions_all()
     if not ps:
         return f"📭 현재 오픈 포지션이 없어.\n\n🕒 {to_kst()}"
     lines = ["📌 *현재 포지션 스냅샷*", "━━━━━━━━━━━━━━"]
