@@ -73,7 +73,10 @@ def asf(v: Any, d: float = 0.0) -> float:
     try:
         if v is None or isinstance(v, bool):
             return d
-        return float(str(v).replace(",", "").strip())
+        s = str(v).replace(",", "").strip()
+        if s.lower() in ("nan", "none", "null", ""):
+            return d
+        return float(s)
     except:
         return d
 
@@ -301,20 +304,72 @@ def is_admin(uid: str) -> bool:
 def sw_key(kind: str, chat_id: str) -> str:
     return f"switch:{kind}:{chat_id}"
 
+# ✅ (추가) Redis commands 절감용 메모리 캐시
+_SW_CACHE: Dict[str, Tuple[str, float]] = {}   # key -> (val, expire_ts)
+_CFG_CACHE: Dict[str, Tuple[str, float]] = {}  # key -> (val, expire_ts)
+_SW_TTL_SEC = 30.0
+_CFG_TTL_SEC = 60.0
+
+def _cache_get(cache: Dict[str, Tuple[str, float]], k: str) -> Optional[str]:
+    try:
+        v, exp = cache.get(k, (None, 0.0))
+        if v is not None and exp > time.time():
+            return v
+    except:
+        pass
+    return None
+
+def _cache_set(cache: Dict[str, Tuple[str, float]], k: str, v: str, ttl: float):
+    try:
+        cache[k] = (v, time.time() + ttl)
+    except:
+        pass
+
+def _cache_del_prefix(cache: Dict[str, Tuple[str, float]], prefix: str):
+    try:
+        ks = [k for k in cache.keys() if k.startswith(prefix)]
+        for k in ks:
+            cache.pop(k, None)
+    except:
+        pass
+
 def sw_get(kind: str, chat_id: str) -> str:
     d = "0" if is_group(chat_id) else "1"
-    v = R.get(sw_key(kind, chat_id))
-    return "1" if (v if v is not None else d) == "1" else "0"
+    k = sw_key(kind, chat_id)
+
+    # ✅ cache hit
+    cv = _cache_get(_SW_CACHE, k)
+    if cv is not None:
+        return "1" if cv == "1" else "0"
+
+    v = R.get(k)
+    out = "1" if (v if v is not None else d) == "1" else "0"
+    _cache_set(_SW_CACHE, k, out, _SW_TTL_SEC)
+    return out
 
 def sw_set(kind: str, chat_id: str, on: bool):
-    R.set(sw_key(kind, chat_id), "1" if on else "0")
+    k = sw_key(kind, chat_id)
+    R.set(k, "1" if on else "0")
+    # ✅ cache invalidate
+    _SW_CACHE.pop(k, None)
 
 def cfg_get(k: str, d=""):
-    v = R.get(f"cfg:{k}")
-    return str(v) if v is not None else d
+    rk = f"cfg:{k}"
+
+    # ✅ cache hit
+    cv = _cache_get(_CFG_CACHE, rk)
+    if cv is not None:
+        return cv
+
+    v = R.get(rk)
+    out = str(v) if v is not None else d
+    _cache_set(_CFG_CACHE, rk, out, _CFG_TTL_SEC)
+    return out
 
 def cfg_set(k: str, v: str):
-    R.set(f"cfg:{k}", str(v))
+    rk = f"cfg:{k}"
+    R.set(rk, str(v))
+    _CFG_CACHE.pop(rk, None)
 
 def cfg_init():
     if cfg_get("report_auto", "") == "":
@@ -391,6 +446,45 @@ def fetch_positions_raw() -> List[Dict[str, Any]]:
             return arr
     return []
 
+# ✅ (추가) margin mode 파싱 보강: Cross/Isolated 오판 방지
+def _norm_margin_mode(it: Dict[str, Any]) -> str:
+    # 여러 필드에서 값을 모아서 판단
+    cand = []
+    for k in ["marginType", "marginMode", "margin_type", "margin_mode", "isolated", "isIsolated", "tradeType", "positionType"]:
+        if k in it:
+            cand.append(it.get(k))
+
+    # 문자열/숫자/불린 전부 대응
+    for v in cand:
+        if v is None:
+            continue
+        s = str(v).strip().lower()
+
+        # bool
+        if s in ("true", "1") and str(v).lower() in ("true", "1") and ("isolated" in [str(x).lower() for x in cand if x is not None]):
+            # 아주 드문 케이스: isolated 필드 자체가 true로 오는 경우
+            return "Isolated"
+
+        # 명시적 문자열
+        if "cross" in s or "crossed" in s:
+            return "Cross"
+        if "isol" in s:
+            return "Isolated"
+
+        # 숫자 코드 케이스(거래소/버전에 따라 다름) - 안전하게만 처리
+        if s == "0":
+            # 보통 0=Cross / 1=Isolated 인 케이스가 많음
+            return "Cross"
+        if s == "2":
+            # 2=Cross 같은 케이스도 있어서 Cross에 우선 배치
+            return "Cross"
+        if s == "1":
+            # 1=Isolated로 쓰이는 케이스가 많음
+            return "Isolated"
+
+    # 기본값: Cross (오판 줄이기 위해 Cross 우선)
+    return "Cross"
+
 def norm_pos(it: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     symbol = str(it.get("symbol") or it.get("ticker") or it.get("pair") or "").strip()
     if not symbol:
@@ -422,12 +516,28 @@ def norm_pos(it: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     entry = asf(it.get("avgPrice") or it.get("entryPrice") or it.get("avgOpenPrice") or it.get("openPrice") or 0)
     mark = asf(it.get("markPrice") or it.get("lastPrice") or it.get("indexPrice") or it.get("closePrice") or entry, entry)
-    upl = asf(it.get("unrealizedProfit") or it.get("unRealizedProfit") or it.get("unrealizedPnl") or it.get("upl") or it.get("positionProfit") or 0)
-    rpl = asf(it.get("realizedProfit") or it.get("realisedPnl") or it.get("realizedPnl") or it.get("rpl") or 0)
+
+    # ✅ uPnL / rPnL: 거래소 필드 그대로 최대한 안전하게
+    upl = asf(
+        it.get("unrealizedProfit")
+        or it.get("unRealizedProfit")
+        or it.get("unrealizedPnl")
+        or it.get("upl")
+        or it.get("positionProfit")
+        or 0
+    )
+    rpl = asf(
+        it.get("realizedProfit")
+        or it.get("realisedPnl")
+        or it.get("realizedPnl")
+        or it.get("rpl")
+        or 0
+    )
+
     lev = asf(it.get("leverage") or it.get("positionLeverage") or 0, 0.0)
 
-    mm = str(it.get("marginType") or it.get("marginMode") or it.get("isolated") or "")
-    margin_mode = "Isolated" if ("isol" in mm.lower() or mm in ("true", "1")) else "Cross"
+    # ✅ Cross/Isolated 판별 보강
+    margin_mode = _norm_margin_mode(it)
 
     value = asf(it.get("positionValue") or it.get("notional") or it.get("positionNotional") or it.get("value") or qty * mark, qty * mark)
     margin = asf(it.get("positionMargin") or it.get("isolatedMargin") or it.get("margin") or (value / lev if lev > 0 else 0), (value / lev if lev > 0 else 0))
@@ -956,17 +1066,8 @@ def hist_list(d: str) -> List[Dict[str, Any]]:
     return out
 
 
-# ====== ✅ 수정(1): income 기반 분해/정산 함수 추가 + fee_calc 교체 (그 외 로직/포맷 영향 없음) ======
+# ====== ✅ income 기반 분해/정산 함수 (CLOSE에만 사용) ======
 def _income_split(symbol: str, st: datetime, en: datetime) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """
-    ✅ 거래소 정산(income) 기반으로
-    - closed_pnl(정산 손익)
-    - fee_funding(수수료+펀딩)
-    - realized(최종 실현손익)
-    를 최대한 안정적으로 분해해서 리턴
-
-    실패(None)면 호출부에서 기존 추정치 로직으로 fallback
-    """
     recs = fetch_income(symbol, int(st.astimezone(UTC).timestamp() * 1000), int(en.astimezone(UTC).timestamp() * 1000))
     if not recs:
         return None, None, None
@@ -975,8 +1076,6 @@ def _income_split(symbol: str, st: datetime, en: datetime) -> Tuple[Optional[flo
     fee_funding_sum = 0.0
     realized_sum = 0.0
 
-    # ✅ 혹시 API가 심볼 필터를 무시/느슨하게 처리하는 경우가 있어서
-    #    응답에 섞여 들어온 다른 심볼 income을 2차로 걸러줌 (Realized 튐 방지)
     req_norm = re.sub(r"[^A-Za-z0-9]", "", symbol).upper()
 
     for r in recs:
@@ -989,35 +1088,24 @@ def _income_split(symbol: str, st: datetime, en: datetime) -> Tuple[Optional[flo
         typ = str(r.get("incomeType") or r.get("type") or r.get("bizType") or r.get("income_type") or "").lower()
         inc = asf(r.get("income") or r.get("profit") or r.get("amount") or r.get("realizedPnl") or 0)
 
-        # income 원본 합 = 최종 실현(거래소 정산에 가장 가까운 기준)
         realized_sum += inc
 
-        # 수수료/펀딩은 타입 키워드로 최대한 분리
         if any(x in typ for x in ["commission", "fee", "funding", "fund"]):
             fee_funding_sum += inc
             continue
 
-        # 나머지는 손익으로 귀속(거래소 타입명이 달라도 보통 손익성 항목)
         closed_sum += inc
 
     return closed_sum, fee_funding_sum, realized_sum
 
-
 def fee_calc(symbol: str, st: datetime, en: datetime, closed: float, entry_v: float, exit_v: float) -> Tuple[float, float, float]:
-    """
-    ✅ CLOSE 정산값을 서로 일치시키기 위한 계산
-    - return: (closed_pnl, fee_funding, realized)
-    """
     c, ff, real = _income_split(symbol, st, en)
     if c is not None:
-        # income 기반 확정
         return c, ff, (c + ff)
 
-    # income 못 가져오면 기존 추정 fallback
     ff = -(abs(entry_v) + abs(exit_v)) * TAKER_FEE_RATE
     return closed, ff, closed + ff
-# ====== ✅ 수정(1) 끝 ======
-
+# ====== ✅ income 기반 끝 ======
 
 
 def send_signal_alert(text: str):
@@ -1047,26 +1135,11 @@ def send_pos_alert(text: str):
                 sent += 1
     logging.info("position alert sent=%s/%s", sent, len(CHAT_IDS_POSITION))
 
-# -----------------------
-# 이하 (포지션/리포트/명령/라우트/부트스트랩) 원본 그대로
-# 단, ✅ 수정(2): OPEN/ADD/REDUCE rPnL 표시만 income으로 보강
-# -----------------------
-
 def process_positions(send_alert=True) -> Dict[str, Any]:
     cur: Dict[str, Dict[str, Any]] = {}
     for p in fetch_positions():
         cur[pkey(p["symbol"], p["side"])] = p
     prev = open_state()
-
-    # ====== ✅ 수정(2): rPnL 표시를 세션 시작 이후 income 합계로 보강 (표시만, 로직/포맷 불변) ======
-    def _rpnL_since(symbol: str, start_iso: str) -> Optional[float]:
-        st = iso_parse(start_iso) or now_kst()
-        en = now_kst()
-        c, ff, real = _income_split(symbol, st, en)
-        if real is None:
-            return None
-        return real
-    # ====== ✅ 수정(2) 끝 ======
 
     if not init_done():
         for k, p in cur.items():
@@ -1100,7 +1173,6 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
         o = prev.get(k)
         if not o:
             events["open"] += 1
-            start_iso = now_kst().isoformat()
             sess_set(
                 k,
                 {
@@ -1109,7 +1181,7 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
                     "base": p["base"],
                     "margin_mode": p["margin_mode"],
                     "leverage": p["leverage"],
-                    "start_ts": start_iso,
+                    "start_ts": now_kst().isoformat(),
                     "entry_price_init": p["entry_price"],
                     "last_entry_price": p["entry_price"],
                     "total_entry_value": p["value"],
@@ -1120,12 +1192,7 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
                 },
             )
             if send_alert:
-                # ✅ rPnL 표시 보강(알림 표시만)
-                p_show = dict(p)
-                rp = _rpnL_since(p.get("symbol", ""), start_iso)
-                if rp is not None:
-                    p_show["r_pnl"] = rp
-                send_pos_alert(tpl_open(p_show))
+                send_pos_alert(tpl_open(p))
         else:
             q0, q1 = asf(o.get("qty")), asf(p.get("qty"))
             s = sess_get(k) or {
@@ -1145,12 +1212,7 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
                 dv = max(asf(p.get("value")) - asf(o.get("value")), (q1 - q0) * asf(p.get("entry_price")))
                 s["total_entry_value"] = asf(s.get("total_entry_value")) + max(dv, 0.0)
                 if send_alert:
-                    # ✅ rPnL 표시 보강(알림 표시만)
-                    p_show = dict(p)
-                    rp = _rpnL_since(p.get("symbol", ""), str(s.get("start_ts", "")))
-                    if rp is not None:
-                        p_show["r_pnl"] = rp
-                    send_pos_alert(tpl_add(o, p_show))
+                    send_pos_alert(tpl_add(o, p))
 
             elif q1 + 1e-12 < q0:
                 events["reduce"] += 1
@@ -1158,12 +1220,7 @@ def process_positions(send_alert=True) -> Dict[str, Any]:
                 rv = max(asf(o.get("value")) - asf(p.get("value")), rq * asf(p.get("mark_price")))
                 s["total_exit_value"] = asf(s.get("total_exit_value")) + max(rv, 0.0)
                 if send_alert:
-                    # ✅ rPnL 표시 보강(알림 표시만)
-                    p_show = dict(p)
-                    rp = _rpnL_since(p.get("symbol", ""), str(s.get("start_ts", "")))
-                    if rp is not None:
-                        p_show["r_pnl"] = rp
-                    send_pos_alert(tpl_reduce(o, p_show))
+                    send_pos_alert(tpl_reduce(o, p))
 
             s.update(
                 {
@@ -1630,9 +1687,8 @@ def daily_report():
 
 @app.route("/health_check", methods=["GET"])
 def health():
-    with LOCK:
-        auto = maybe_auto_report()
-    return jsonify({"ok": True, "auto_report": auto, "time": to_kst()})
+    # ✅ CHANGE: health_check에서 maybe_auto_report() 호출 제거 (Redis commands 절감)
+    return jsonify({"ok": True, "auto_report": {"sent": False, "reason": "disabled_in_health_check"}, "time": to_kst()})
 
 
 # ===== Bootstrap =====
